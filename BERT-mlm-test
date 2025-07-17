@@ -53,6 +53,7 @@ outputs = mlm_model(**encoded_inputs)
 top_k = 5
 for i, pos in enumerate(pos_masks):
     # Display sentence and tokens
+    print('\n---- Sentence ', i+1)
     print('Original:', masked_sentences[i])
     print('Tokenized:', tokenizer.tokenize(masked_sentences[i]))
     print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
@@ -62,6 +63,7 @@ for i, pos in enumerate(pos_masks):
     top_k_probs, top_k_ids = torch.topk(probs, top_k) # get top_k probs from tensor
 
     # Display top scores
+    print("\nTop predictions to replace masked token:")
     for prob, token_id in zip(top_k_probs, top_k_ids):
         #token_str = tokenizer.decode([token_id.item()]).strip()
         tokens = tokenizer.convert_ids_to_tokens([token_id.item()])
@@ -72,7 +74,3 @@ for i, pos in enumerate(pos_masks):
     top_token = tokenizer.decode([top_k_ids[0].item()]).strip()
     unmasked_sentence = masked_sentences[i].replace('[MASK]', top_token)
     print(f"\nUnmasked sentence with top prediction:\n{unmasked_sentence}\n")
-
-
-
-
