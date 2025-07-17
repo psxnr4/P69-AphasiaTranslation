@@ -1,0 +1,78 @@
+# code adpated from the provided base file in https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
+
+# Input three sentences into the pre-trained BERT model, each with a masked word
+# Generate the top 5 predictions to replace this word
+# Output these and their confidence scores
+# Complete sentences with the highest scoring word
+
+from transformers import BertTokenizer, BertForMaskedLM, pipeline
+import torch
+
+# Initialize the tokenizer from the model
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+# Get BERT masked language model from Hugging Face
+mlm_model = BertForMaskedLM.from_pretrained('bert-base-uncased')
+mlm_model.eval()
+
+# Define masked sentences
+masked_sentences = ['He kicked a soccer [MASK] and it broke the window.',
+                    'It is raining so he brought [MASK] umbrella.',
+                    'She told him to bring his [MASK] as it is raining.']
+
+#Tokenize Sentences
+'''
+for i in range(0,masked_sentences.__len__()):
+    print('Original:', masked_sentences[i])
+    print('Tokenized:', tokenizer.tokenize(masked_sentences[i]))
+    print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
+    print('\n')
+'''
+
+# Get predictions using pipeline
+# -- high level API wrapper for filling mask values
+'''
+fill_mask = pipeline("fill-mask", model="bert-base-uncased")
+predictions = fill_mask(masked_sentences[0])
+# Display results
+for pred in predictions:
+    print(f"Token: {pred['token_str']}, Score: {pred['score']:.4f}")
+'''
+
+# Tokeniser sentences and encode -- incld. padding as sentences are different lengths
+encoded_inputs = tokenizer(masked_sentences, return_tensors='pt', padding=True)
+input_ids = encoded_inputs["input_ids"]
+
+# Dynamically find [MASK] token positions in input sentence
+mask_token_id = tokenizer.mask_token_id  # This is 103 for BERT
+pos_masks = [torch.where(seq == mask_token_id)[0].item() for seq in input_ids]
+
+# Pass into MLM model and get raw score outputs
+outputs = mlm_model(**encoded_inputs)
+
+# Get top-k word predictions for each masked token
+top_k = 5
+for i, pos in enumerate(pos_masks):
+    # Display sentence and tokens
+    print('Original:', masked_sentences[i])
+    print('Tokenized:', tokenizer.tokenize(masked_sentences[i]))
+    print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
+
+    logits = outputs.logits[i, pos]  #  contains raw predicition scores
+    probs = torch.nn.functional.softmax(logits, dim=-1) # softmax raw scores into probabilities
+    top_k_probs, top_k_ids = torch.topk(probs, top_k) # get top_k probs from tensor
+
+    # Display top scores
+    for prob, token_id in zip(top_k_probs, top_k_ids):
+        #token_str = tokenizer.decode([token_id.item()]).strip()
+        tokens = tokenizer.convert_ids_to_tokens([token_id.item()])
+        token_str = tokenizer.convert_tokens_to_string(tokens).strip()
+        print(f"Token: {token_str}, Score: {prob.item():.4f}")
+
+    # Get top score and fill in the mask
+    top_token = tokenizer.decode([top_k_ids[0].item()]).strip()
+    unmasked_sentence = masked_sentences[i].replace('[MASK]', top_token)
+    print(f"\nUnmasked sentence with top prediction:\n{unmasked_sentence}\n")
+
+
+
+
