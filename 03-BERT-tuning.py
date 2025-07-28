@@ -171,16 +171,6 @@ def calculate_accuracy(data, model, tokenizer, device):
 
 
 def training(model, dataloader, device):
-    batch = next(iter(dataloader))
-    input_ids = batch['input_ids']
-    labels = batch['labels']
-    masked_tokens = (labels != -100)
-
-    # Debug: print number of masked tokens
-    print("Masked tokens per batch:", masked_tokens.sum().item())
-    print(tokenizer.decode(input_ids[0]))
-    print("Labels:", tokenizer.decode([l for l in labels[0] if l != -100]))# filter tokens not being predicted
-
     # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
     epochs = 3  # The model will train for 3 full passes over the dataset.
     optimizer = AdamW(model.parameters(), lr=5e-5)
