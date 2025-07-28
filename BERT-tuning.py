@@ -1,19 +1,40 @@
 # code adapted from the provided base file in https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
 # model fine-tuned following https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
 
-# Input sentences into the pre-trained BERT model, each with a masked word
-# Generate the top 5 predictions to replace this word
-# Output these and their confidence scores
-# Complete sentences with the highest scoring word
+# A random token in each control-passage is masked and the predicted word is compared to the original to calculate its accuracy
+# - this is using only the context of the surrounding passage to predict the missing word
+# AdamW optimiser is then placed on the model + we run training on the control data in batches
+# The testing stage is then repeated on the same data to predict new random tokens.
+# - this is able to use the context of all control data
+# Displays only the predictions that do not match the original token - some of these may be accepted if they give the same meaning
+
+# -- Accuracy calculated across tests using random tokens pre- and post- training using three epochs
+# Before training: Accuracy is 59.72% on 72 sequences
+# 62.50% on 72 sequences when restricting masks to avoid special tokens or punctuation
+
+# - learning rate 1e-5
+# Run 1. 66.67% on 72 sequences
+
+# - learning rate 3e-5
+# 75.00% on 72 sequences
+# 69.44% on 72 sequences
+
+# - learning rate 5e-5
+#  80.56% on 72 sequences
+#  72.22% on 72 sequences
+
+
+
 
 from transformers import BertTokenizer, BertForMaskedLM, pipeline
 import torch
-
-import torch
 from tqdm.auto import tqdm
-from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed
+from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed, DataCollatorForLanguageModeling
 import pandas as pd
 import warnings
+import string
+import random
+
 
 set_seed(42)
 warnings.filterwarnings("ignore")
@@ -29,13 +50,25 @@ filler_words = {
         'uh' : 7910
 }
 
+# Define training dataset
+# @ adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
+class TextDataset(torch.utils.data.Dataset):
+    def __init__(self, encodings):
+        self.encodings = encodings
+
+    def __len__(self):
+        return self.encodings['input_ids'].shape[0]
+
+    def __getitem__(self, idx):
+        return {key: val[idx] for key, val in self.encodings.items()}
+
 
 
 def prep_training_data():
     # @ adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
     # -- preprocess data by transforming into a list of sentences
     # Read test data -- transcripts of control speech
-    file_path = 'capilouto01a.umbrella.gem2.flo.cex'
+    file_path = 'combined_output.cex'
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = [line.rstrip().rstrip('.') for line in f] # remove trailing periods
     content = ' '.join(lines) # remove line breaks
@@ -51,7 +84,7 @@ def prep_training_data():
     # Add key for prediction labels
     inputs['labels'] = inputs['input_ids'].detach().clone()
 
-    # -- Create a mask over the data
+    ''''# -- Create a mask over the data
     random_tensor = torch.rand(inputs['input_ids'].shape)
     print(inputs['input_ids'].shape, random_tensor.shape)
 
@@ -60,41 +93,59 @@ def prep_training_data():
     masked_tensor = (random_tensor < 0.15) * (inputs['input_ids'] != 101) * (inputs['input_ids'] != 102) * (
                 inputs["input_ids"] != 0)
 
-    # Extract non-zero values and replace the coresponding tokens with the MASK value
+    # Extract non-zero values and replace the corresponding tokens with the MASK value
     nonzero_indices = [torch.nonzero(row).flatten().tolist() for row in masked_tensor]
     tokenizer.convert_tokens_to_ids("[MASK]")
 
     # Apply the mask
     for i in range(len(inputs['input_ids'])):
         inputs['input_ids'][i, nonzero_indices[i]] = 103
-
-    return train_data
-
 '''
+    # Create dataset to define how to load and batch the tokenized data
+    dataset = TextDataset(inputs)
+
+    # Hugging Face’s masking collator to automatically mask 15% of the tokens
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=True,
+        mlm_probability=0.15
+    )
+
     dataloader = torch.utils.data.DataLoader(
-    dataset,
-    batch_size=16, # Each batch contains 16 sequences
-    shuffle=True # Shuffle the data to improve training
-)
-'''
+        dataset,
+        batch_size=16,
+        shuffle=True,
+        collate_fn=data_collator
+    )
+    return train_data, inputs, dataloader
 
-def calculate_accuracy(data, model, tokenizer):
-    # taken from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
+
+def calculate_accuracy(data, model, tokenizer, device):
+    # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
 
     model.eval() # Puts the model in evaluation mode
     correct = 0
     total = 0
 
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    model.to(device)  # Move the model to the device ("cpu" or "cuda")
-
-
+    #count = 0
+    #while count < 10:
     for sentence in data:
-        print('\n', sentence)
+        #print('\n', sentence)
         # Replace a random token with [MASK] and store the original token
         tokens = tokenizer.encode(sentence, return_tensors='pt')[0]
-        masked_index = torch.randint(0, len(tokens), (1,)).item()
-        print("random masked index: ", masked_index)
+        #masked_index = torch.randint(0, len(tokens), (1,)).item()
+
+        # Get list of tokens that can be masked -- avoid special tokens or punctuation
+        special_tokens = tokenizer.all_special_ids
+        punct_tokens = tokenizer.encode(string.punctuation, add_special_tokens=False)
+
+        candidate_tokens = [
+            i for i, token_id in enumerate(tokens)
+            if token_id not in special_tokens and token_id not in punct_tokens
+        ]
+        masked_index = random.choice(candidate_tokens)
+
+
         original_token = tokens[masked_index].item()
         tokens[masked_index] = tokenizer.mask_token_id
 
@@ -108,20 +159,65 @@ def calculate_accuracy(data, model, tokenizer):
 
         if predicted_token_id == original_token:
             correct += 1
+        else:
+            # display incorrect prediction
+            print('\n', tokenizer.decode(tokens))
+            print("predicted: ", predicted_token_id, "| original: ", original_token)
+            print('predicted: ', tokenizer.decode(predicted_token_id), '| original: ', tokenizer.decode(original_token))
+
         total += 1
-
-        print("predicted: ", predicted_token_id, "| original: ", original_token)
-        print('predicted: ', tokenizer.decode(predicted_token_id), '| original: ', tokenizer.decode(original_token) )
-
     accuracy = correct / total
     print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
 
 
+def training(model, dataloader, device):
+    batch = next(iter(dataloader))
+    input_ids = batch['input_ids']
+    labels = batch['labels']
+    masked_tokens = (labels != -100)
 
-def define_input():
+    # Debug: print number of masked tokens
+    print("Masked tokens per batch:", masked_tokens.sum().item())
+    print(tokenizer.decode(input_ids[0]))
+    print("Labels:", tokenizer.decode([l for l in labels[0] if l != -100]))# filter tokens not being predicted
+
+    # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
+    epochs = 3  # The model will train for 3 full passes over the dataset.
+    optimizer = AdamW(model.parameters(), lr=5e-5)
+    model.train()  # Puts the model in training mode
+
+    #epoch_losses = []
+
+    for epoch in range(epochs):
+        loop = tqdm(dataloader)  # We use this to display a progress bar
+        #batch_losses = []
+
+        for batch in loop:
+            optimizer.zero_grad()  # Reset gradients before each batch
+            # Move input_ids, labels, attention_mask to be on the same device as the model
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['labels'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)  # Forward pass
+            loss = outputs.loss
+
+            loss.backward()  # Compute gradients, backward pass
+            optimizer.step()  # Update model parameters
+
+            loop.set_description("Epoch: {}".format(epoch))  # Display epoch number
+            loop.set_postfix(loss=loss.item())  # Show loss in the progress bar
+'''
+            batch_losses.append(loss.item())
+
+        avg_loss = sum(batch_losses) / len(batch_losses)
+        #epoch_losses.append(avg_loss)
+        print(f"\nEpoch {epoch} average loss: {avg_loss:.4f}")
+'''
+
+def sample_input():
     # Define input sentence constructed from utterances
     sentence = ["and then he uh he he he must have had the umbrella on his back it looks like in the pack. and they went out on the rain and he was brained on."]
-
     original = sentence[0]
     tokenized = tokenizer.tokenize(sentence[0])
     tokenIDs = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(sentence[0]))
@@ -227,7 +323,7 @@ def output_results(masked_sentences, encoded_inputs, input_ids, pos_masks ):
 
 def prepare_input_data():
     # Clean utterance of syntax errors
-    tokens = define_input()
+    tokens = sample_input()
     filtered = remove_fillers(tokens)
     filtered = remove_repetition(filtered)
     # Mask erroneous words
@@ -237,10 +333,21 @@ def prepare_input_data():
 
 def main():
     # Train mlm model on control data
-    training_data = prep_training_data()
+    training_data, mask_training_data, dataloader = prep_training_data()
 
     mlm_model.eval()
-    calculate_accuracy(training_data, mlm_model, tokenizer)
+
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    mlm_model.to(device)  # Move the model to the device ("cpu" or "cuda")
+
+    # run model on random tokens in the control data + calculate produced accuracy
+    #calculate_accuracy(training_data, mlm_model, tokenizer, device)
+
+    # use the control data to train the model
+    training(mlm_model, dataloader, device)
+
+    # test again on control data -- using a random token in each story
+    calculate_accuracy(training_data, mlm_model, tokenizer, device)
 
     '''
     # Prepare input data
