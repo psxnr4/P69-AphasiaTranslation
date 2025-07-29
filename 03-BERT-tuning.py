@@ -23,7 +23,20 @@
 #  80.56% on 72 sequences
 #  73.61% on 72 sequences
 
-# -- need to balance learning rate and number of epochs when testing on aphasia data
+# -------------------------------------------------------------------
+
+# Accuracy on a test aphasia transcript -- will be less effective due to disjoint sentences, repetition, and use of disjointed/not linked words
+
+# Learning rate 5-e5
+# W01
+# 42.86% on 7 sequences without training
+# 57.14% on 7 sequences after training
+#-- TODO: maybe using what has been said might help? -- repeat with higher learning rate
+
+# W03
+# 20% on 5 seq.without training
+# 40% on 5 seq after training
+
 
 
 from transformers import BertTokenizer, BertForMaskedLM, pipeline
@@ -166,6 +179,7 @@ def calculate_accuracy_on_dataset(data, model, tokenizer, device):
     print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
 
 
+
 def training(model, dataloader, device):
     #batch = next(iter(dataloader))
     #input_ids = batch['input_ids']
@@ -263,6 +277,10 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
         # Keep a list of predicted tokens for each
         predicted_tokens = []
         mask_num = -1
+        correct = 0
+        total = 0
+        print(target_words)
+
         for pos in mask_positions:
             mask_num += 1
             logits = outputs.logits[i, pos]  #  contains raw prediction scores
@@ -284,6 +302,19 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
             best_prediction = tokenizer.decode([top_k_ids[0].item()]).strip()
             predicted_tokens.append(f"*{best_prediction}*")
 
+            #TODO: Compare target word to predicted word + keep running track of accuracy of run
+            #TODO: Compare accuracy pre and post training on random control tokens
+
+            if best_prediction == target_words[mask_num]:
+                correct += 1
+                print("Match: ")
+            else:
+                print("!!! No match: ")
+
+            print("predicted: ", best_prediction, "| original: ", target_words[mask_num])
+            total += 1
+        accuracy = correct / total
+        print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
 
         # Repair sentence with predictions - Replace each mask token one by one
         unmasked_sentence = masked_sentences
@@ -293,6 +324,8 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
         # Decode repaired sentence from tokens
         #unmasked_sentence = tokenizer.decode(input_ids[i], skip_special_tokens=True)
         print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
+
+
 
 
 
@@ -311,7 +344,7 @@ def main():
     #calculate_accuracy(training_data, mlm_model, tokenizer, device)
 
     # use the control data to train the model
-    #training(mlm_model, dataloader, device)
+    training(mlm_model, dataloader, device)
 
     # test again on control data -- using a random token in each story
     #calculate_accuracy(training_data, mlm_model, tokenizer, device)
