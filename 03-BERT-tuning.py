@@ -8,7 +8,7 @@
 # - this is able to use the context of all control data
 # Displays only the predictions that do not match the original token - some of these may be accepted if they give the same meaning
 
-# -- Accuracy calculated across tests using random tokens pre- and post- training using three epochs
+# -- Accuracy calculated across tests using random tokens on control data pre- and post- training using three epochs
 # Before training: Accuracy is 59.72% on 72 sequences
 # 62.50% on 72 sequences when restricting masks to avoid special tokens or punctuation
 
@@ -21,9 +21,9 @@
 
 # - learning rate 5e-5
 #  80.56% on 72 sequences
-#  72.22% on 72 sequences
+#  73.61% on 72 sequences
 
-
+# -- need to balance learning rate and number of epochs when testing on aphasia data
 
 
 from transformers import BertTokenizer, BertForMaskedLM, pipeline
@@ -35,6 +35,7 @@ import warnings
 import string
 import random
 
+input_file_path = 'Masked-transcript.txt'
 
 set_seed(42)
 warnings.filterwarnings("ignore")
@@ -45,10 +46,6 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 mlm_model = BertForMaskedLM.from_pretrained('bert-base-uncased')
 mlm_model.eval()
 
-# Dictionary of filler words to remove from utterance
-filler_words = {
-        'uh' : 7910
-}
 
 # Define training dataset
 # @ adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
@@ -75,7 +72,7 @@ def prep_training_data():
 
     # Convert to list, splitting at each transcript break delimiter
     train_data = content.split('|')
-    print(train_data)
+    #print(train_data)
 
     # -- Tokenise data
     inputs = tokenizer(
@@ -120,15 +117,13 @@ def prep_training_data():
     return train_data, inputs, dataloader
 
 
-def calculate_accuracy(data, model, tokenizer, device):
+def calculate_accuracy_on_dataset(data, model, tokenizer, device):
     # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
 
     model.eval() # Puts the model in evaluation mode
     correct = 0
     total = 0
 
-    #count = 0
-    #while count < 10:
     for sentence in data:
         #print('\n', sentence)
         # Replace a random token with [MASK] and store the original token
@@ -161,7 +156,8 @@ def calculate_accuracy(data, model, tokenizer, device):
             correct += 1
         else:
             # display incorrect prediction
-            print('\n', tokenizer.decode(tokens))
+            #print('\n', tokenizer.decode(tokens))
+            print("No match: ")
             print("predicted: ", predicted_token_id, "| original: ", original_token)
             print('predicted: ', tokenizer.decode(predicted_token_id), '| original: ', tokenizer.decode(original_token))
 
@@ -171,8 +167,18 @@ def calculate_accuracy(data, model, tokenizer, device):
 
 
 def training(model, dataloader, device):
+    #batch = next(iter(dataloader))
+    #input_ids = batch['input_ids']
+    #labels = batch['labels']
+    #masked_tokens = (labels != -100)
+
+    # Debug: print number of masked tokens
+    #print("Masked tokens per batch:", masked_tokens.sum().item())
+    #print(tokenizer.decode(input_ids[0]))
+    #print("Labels:", tokenizer.decode([l for l in labels[0] if l != -100]))# filter tokens not being predicted
+
     # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
-    epochs = 3  # The model will train for 3 full passes over the dataset.
+    epochs = 3  # Number of passes over full dataset
     optimizer = AdamW(model.parameters(), lr=5e-5)
     model.train()  # Puts the model in training mode
 
@@ -205,67 +211,32 @@ def training(model, dataloader, device):
         print(f"\nEpoch {epoch} average loss: {avg_loss:.4f}")
 '''
 
-def sample_input():
+def get_masked_input():
     # Define input sentence constructed from utterances
-    sentence = ["and then he uh he he he must have had the umbrella on his back it looks like in the pack. and they went out on the rain and he was brained on."]
-    original = sentence[0]
-    tokenized = tokenizer.tokenize(sentence[0])
-    tokenIDs = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(sentence[0]))
+    with open(input_file_path, 'r', encoding='utf-8') as f:
+        print('..Reading File..')
+        # First line of file contains the target words that have been suggested for repairs
+        target_words = f.readline().strip()
+        target_words = target_words.split(',')
 
-   # print('Original:', original)
-    #print('Tokenized:', tokenized)
-    #print('Token IDs:', tokenIDs)
-    return tokenIDs
+        # Read in the rest of the transcript
+        masked_content = f.read()
 
+        #print(target_words)
+        #print(masked_content)
 
-# Analyse tokens for filler words
-def remove_fillers(tokens):
-    print('1..Removing Filler Words..')
-    # Create set of the tokens corresponding to filler words for efficient searching
-    filler_tokens = set(filler_words.values())
-    filtered_tokens = [t for t in tokens if t not in filler_tokens]
-
-    #print('Filtered tokens:', filtered_tokens)
-    #print('Decoded ', tokenizer.decode(filtered_tokens) )
-    return filtered_tokens
-
-# Analyse tokens for repeated words
-def remove_repetition(tokens):
-    print('2..Removing Repeated Words..')
-    repeated = []
-    i = 0
-    while i < len(tokens)-1:
-        # If token matches the one after it, then remove
-        if tokens[i] == tokens[i + 1]:
-            repeated.append((i, tokens[i]))
-            del tokens[i]
-        else:
-            i += 1
-
-    #print('Repeated words found at: ', repeated)
-    #print('Filtered rep. :', tokens)
-    #print('Decoded: ', tokenizer.decode(tokens))
-
-    return tokens
-
-
-
-# TODO: locate erroneous words + mask
-def mask_tokens(tokens):
-    masked_sentence = ['and then he must have had the umbrella on his back it looks like in the pack and [MASK] went out [MASK] the rain and he was [MASK] on.']
-    #masked_sentence = ['it was raining and he must have had the umbrella in his bag so he got [MASK].']
-    print('\nMasked sentence: ', masked_sentence)
-    return masked_sentence
+    return target_words, masked_content
 
 
 def tokenise_input(masked_sentences):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
-    print('..Tokenise Input..')
+    print('..Tokenising Input..')
     # Tokenise sentences and encode -- incld. padding as sentences are different lengths
     encoded_inputs = tokenizer(masked_sentences, return_tensors='pt', padding=True)
     input_ids = encoded_inputs["input_ids"]  # shape: [batch_size, sequence_length]
 
     # Dynamically find [MASK] token positions in input sentence
+    print('..Finding Masks..')
     mask_token_id = tokenizer.mask_token_id  # This is 103 for BERT
     pos_masks = [torch.where(seq == mask_token_id)[0].tolist() for seq in
                  input_ids]  # 2d array -- list of indexes for mask tokens in each sentence
@@ -274,12 +245,14 @@ def tokenise_input(masked_sentences):
 
 
 
-def output_results(masked_sentences, encoded_inputs, input_ids, pos_masks ):
+def output_results(target_words, masked_sentences, encoded_inputs, input_ids, pos_masks ):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
+    print('..Passing into model..')
     # Pass into MLM model and get raw score outputs
     outputs = mlm_model(**encoded_inputs)
     # Get top-k word predictions for each masked token
     top_k = 5
+
     for i, mask_positions in enumerate(pos_masks):
         # Display sentence and tokens
         #print('\n---- Sentence ', i + 1)
@@ -287,38 +260,42 @@ def output_results(masked_sentences, encoded_inputs, input_ids, pos_masks ):
         #print('Tokenized:', tokenizer.tokenize(masked_sentences[i]))
         #print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
 
+        # Keep a list of predicted tokens for each
+        predicted_tokens = []
+        mask_num = -1
         for pos in mask_positions:
+            mask_num += 1
             logits = outputs.logits[i, pos]  #  contains raw prediction scores
             probs = torch.nn.functional.softmax(logits, dim=-1) # softmax raw scores into probabilities
             top_k_probs, top_k_ids = torch.topk(probs, top_k) # get top_k probs from tensor
 
+            print("\nSuggested target word is : ", target_words[mask_num])
             # Display top scores
-            print("\nTop predictions to replace masked token:")
+            print("Top predictions to replace masked token:")
             for prob, token_id in zip(top_k_probs, top_k_ids):
-                #token_str = tokenizer.decode([token_id.item()]).strip()
-                tokens = tokenizer.convert_ids_to_tokens([token_id.item()])
-                token_str = tokenizer.convert_tokens_to_string(tokens).strip()
+                token_str = tokenizer.decode([token_id.item()]).strip()
+                #tokens = tokenizer.convert_ids_to_tokens([token_id.item()])
+                #token_str = tokenizer.convert_tokens_to_string(tokens).strip()
                 print(f"Token: {token_str}, Score: {prob.item():.4f}")
 
             # Replace mask token with the top prediction
-            input_ids[i, pos] = top_k_ids[0]
+            #input_ids[i, pos] = top_k_ids[0]
+            # Get top prediction and store it with a highlight
+            best_prediction = tokenizer.decode([top_k_ids[0].item()]).strip()
+            predicted_tokens.append(f"*{best_prediction}*")
 
+
+        # Repair sentence with predictions - Replace each mask token one by one
+        unmasked_sentence = masked_sentences
+        for predicted in predicted_tokens:
+            unmasked_sentence = unmasked_sentence.replace(tokenizer.mask_token, predicted, 1)
 
         # Decode repaired sentence from tokens
-        unmasked_sentence = tokenizer.decode(input_ids[i], skip_special_tokens=True)
-        print(f"\nUnmasked sentence with top prediction:\n{unmasked_sentence}\n")
+        #unmasked_sentence = tokenizer.decode(input_ids[i], skip_special_tokens=True)
+        print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
 
 
 
-
-def prepare_input_data():
-    # Clean utterance of syntax errors
-    tokens = sample_input()
-    filtered = remove_fillers(tokens)
-    filtered = remove_repetition(filtered)
-    # Mask erroneous words
-    masked_sentences = mask_tokens(filtered)
-    return masked_sentences
 
 
 def main():
@@ -334,19 +311,18 @@ def main():
     #calculate_accuracy(training_data, mlm_model, tokenizer, device)
 
     # use the control data to train the model
-    training(mlm_model, dataloader, device)
+    #training(mlm_model, dataloader, device)
 
     # test again on control data -- using a random token in each story
-    calculate_accuracy(training_data, mlm_model, tokenizer, device)
+    #calculate_accuracy(training_data, mlm_model, tokenizer, device)
 
-    '''
     # Prepare input data
-    masked_sentences = prepare_input_data()
+    target_words, masked_sentences = get_masked_input()
     # Tokenise sentences
     encoded_inputs, input_ids, pos_masks = tokenise_input(masked_sentences)
     # Pass into mlm model and output predictions for masked words
-    output_results(masked_sentences, encoded_inputs, input_ids, pos_masks)
-    '''
+    output_results(target_words, masked_sentences, encoded_inputs, input_ids, pos_masks)
+
 
 
 
