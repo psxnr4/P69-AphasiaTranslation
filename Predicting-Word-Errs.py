@@ -8,36 +8,12 @@
 # - this is able to use the context of all control data
 # Displays only the predictions that do not match the original token - some of these may be accepted if they give the same meaning
 
-# -- Accuracy calculated across tests using random tokens on control data pre- and post- training using three epochs
-# Before training: Accuracy is 59.72% on 72 sequences
-# 62.50% on 72 sequences when restricting masks to avoid special tokens or punctuation
-
-# - learning rate 1e-5
-# Run 1. 66.67% on 72 sequences
-
-# - learning rate 3e-5
-# 75.00% on 72 sequences
-# 69.44% on 72 sequences
-
-# - learning rate 5e-5
-#  80.56% on 72 sequences
-#  73.61% on 72 sequences
-
-# -------------------------------------------------------------------
-
-# Accuracy on a test aphasia transcript -- will be less effective due to disjoint sentences, repetition, and use of disjointed/not linked words
-
-# Learning rate 5-e5
-# W01
-# 42.86% on 7 sequences without training
-# 57.14% on 7 sequences after training
-#-- TODO: maybe using what has been said might help? -- repeat with higher learning rate
-
-# W03
-# 20% on 5 seq.without training
-# 40% on 5 seq after training
-
-
+# -- Combining control dataset and repaired aphasia dataset
+# -- On W01 this gives accuracy of Accuracy: 71.43% on 7 sequences using learning rate 5e-05
+# -- Accuracy is 42.86% on 7 sequences before training
+'''Epoch: 0: 100%|██████████| 11/11 [08:04<00:00, 44.09s/it, loss=1.79]
+Epoch: 1: 100%|██████████| 11/11 [08:58<00:00, 48.97s/it, loss=1.91]
+Epoch: 2: 100%|██████████| 11/11 [13:12<00:00, 72.06s/it, loss=1.77]'''
 
 from transformers import BertTokenizer, BertForMaskedLM, pipeline
 import torch
@@ -47,6 +23,7 @@ import pandas as pd
 import warnings
 import string
 import random
+from torch.utils.data import ConcatDataset
 
 input_file_path = 'Masked-transcript.txt'
 
@@ -67,18 +44,16 @@ class TextDataset(torch.utils.data.Dataset):
         self.encodings = encodings
 
     def __len__(self):
-        return self.encodings['input_ids'].shape[0]
+        return len(self.encodings['input_ids'])
 
     def __getitem__(self, idx):
         return {key: val[idx] for key, val in self.encodings.items()}
 
 
-
-def prep_training_data():
+#Tokenise training data and create dataloader masking 15% of tokens
+def prep_training_data(file_path):
     # @ adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
-    # -- preprocess data by transforming into a list of sentences
-    # Read test data -- transcripts of control speech
-    file_path = 'combined_output.cex'
+    # Read test data
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = [line.rstrip().rstrip('.') for line in f] # remove trailing periods
     content = ' '.join(lines) # remove line breaks
@@ -89,10 +64,8 @@ def prep_training_data():
 
     # -- Tokenise data
     inputs = tokenizer(
-        train_data, max_length=512, truncation=True, padding=True, return_tensors='pt'
+        train_data, max_length=512, truncation=True, padding=True, return_tensors=None
     ) # keys: input_ids, token_type_ids, attention_mask
-    # Add key for prediction labels
-    inputs['labels'] = inputs['input_ids'].detach().clone()
 
     ''''# -- Create a mask over the data
     random_tensor = torch.rand(inputs['input_ids'].shape)
@@ -114,6 +87,12 @@ def prep_training_data():
     # Create dataset to define how to load and batch the tokenized data
     dataset = TextDataset(inputs)
 
+    return dataset
+
+# Concat datasets to prevent resetting the AdamW optimiser between training sets
+def combine_training_data(dataset1, dataset2):
+    combined_dataset = ConcatDataset([dataset1, dataset2])
+
     # Hugging Face’s masking collator to automatically mask 15% of the tokens
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
@@ -122,14 +101,56 @@ def prep_training_data():
     )
 
     dataloader = torch.utils.data.DataLoader(
-        dataset,
+        combined_dataset,
         batch_size=16,
         shuffle=True,
         collate_fn=data_collator
     )
-    return train_data, inputs, dataloader
+    return dataloader
+
+'''
+    # Sanity check: Get one batch from the DataLoader [chatgpt gen]
+    batch = next(iter(dataloader))
+    # Print keys and tensor shapes
+    print("Batch keys:", batch.keys())
+    for key, value in batch.items():
+        print(f"{key}: shape = {value.shape}, dtype = {value.dtype}")
+    masked_count = (batch['input_ids'] == tokenizer.mask_token_id).sum().item()
+    print(f"Number of [MASK] tokens in this batch: {masked_count}")
+'''
 
 
+
+def training(model, dataloader, device):
+    # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
+    epochs = 3  # Number of passes over full dataset
+    optimizer = AdamW(model.parameters(), lr=5e-5)
+    model.train()  # Puts the model in training mode
+
+    for epoch in range(epochs):
+        loop = tqdm(dataloader)  # We use this to display a progress bar
+
+        for batch in loop:
+            optimizer.zero_grad()  # Reset gradients before each batch
+            # Move input_ids, labels, attention_mask to be on the same device as the model
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['labels'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)  # Forward pass
+            loss = outputs.loss
+
+            loss.backward()  # Compute gradients, backward pass
+            optimizer.step()  # Update model parameters
+
+            loop.set_description("Epoch: {}".format(epoch))  # Display epoch number
+            loop.set_postfix(loss=loss.item())  # Show loss in the progress bar
+
+
+
+
+
+# Mask random words within the data + predict them -- calculate success across all predictions
 def calculate_accuracy_on_dataset(data, model, tokenizer, device):
     # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
 
@@ -180,50 +201,6 @@ def calculate_accuracy_on_dataset(data, model, tokenizer, device):
 
 
 
-def training(model, dataloader, device):
-    #batch = next(iter(dataloader))
-    #input_ids = batch['input_ids']
-    #labels = batch['labels']
-    #masked_tokens = (labels != -100)
-
-    # Debug: print number of masked tokens
-    #print("Masked tokens per batch:", masked_tokens.sum().item())
-    #print(tokenizer.decode(input_ids[0]))
-    #print("Labels:", tokenizer.decode([l for l in labels[0] if l != -100]))# filter tokens not being predicted
-
-    # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
-    epochs = 3  # Number of passes over full dataset
-    optimizer = AdamW(model.parameters(), lr=5e-5)
-    model.train()  # Puts the model in training mode
-
-    #epoch_losses = []
-
-    for epoch in range(epochs):
-        loop = tqdm(dataloader)  # We use this to display a progress bar
-        #batch_losses = []
-
-        for batch in loop:
-            optimizer.zero_grad()  # Reset gradients before each batch
-            # Move input_ids, labels, attention_mask to be on the same device as the model
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)  # Forward pass
-            loss = outputs.loss
-
-            loss.backward()  # Compute gradients, backward pass
-            optimizer.step()  # Update model parameters
-
-            loop.set_description("Epoch: {}".format(epoch))  # Display epoch number
-            loop.set_postfix(loss=loss.item())  # Show loss in the progress bar
-'''
-            batch_losses.append(loss.item())
-
-        avg_loss = sum(batch_losses) / len(batch_losses)
-        #epoch_losses.append(avg_loss)
-        print(f"\nEpoch {epoch} average loss: {avg_loss:.4f}")
-'''
 
 def get_masked_input():
     # Define input sentence constructed from utterances
@@ -332,19 +309,26 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
 
 
 def main():
-    # Train mlm model on control data
-    training_data, mask_training_data, dataloader = prep_training_data()
+    # Create dataset from the control transcripts
+    control_file_path = 'control_training_combined_output.cex'
+    control_dataset = prep_training_data(control_file_path)
 
+    # Create dataset from the repaired aphasia transcripts
+    aphasia_file_path = 'aphasia_training_combined_output.cex'
+    aphasia_dataset = prep_training_data(aphasia_file_path)
+
+    dataloader = combine_training_data(control_dataset, aphasia_dataset)
+
+    # Setup model
     mlm_model.eval()
-
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     mlm_model.to(device)  # Move the model to the device ("cpu" or "cuda")
 
     # run model on random tokens in the control data + calculate produced accuracy
     #calculate_accuracy(training_data, mlm_model, tokenizer, device)
 
-    # use the control data to train the model
-    training(mlm_model, dataloader, device)
+    # Train the model on the combined dataset
+    #training(mlm_model, dataloader, device)
 
     # test again on control data -- using a random token in each story
     #calculate_accuracy(training_data, mlm_model, tokenizer, device)
