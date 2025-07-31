@@ -8,7 +8,7 @@
 # - this is able to use the context of all control data
 # Displays only the predictions that do not match the original token - some of these may be accepted if they give the same meaning
 
-# -- Combining control dataset and repaired aphasia dataset
+# -- Training on the combined dataset on control and repaired aphasia transcripts
 # -- On W01 this gives accuracy of Accuracy: 71.43% on 7 sequences using learning rate 5e-05
 # -- Accuracy is 42.86% on 7 sequences before training
 '''Epoch: 0: 100%|██████████| 11/11 [08:04<00:00, 44.09s/it, loss=1.79]
@@ -328,7 +328,7 @@ def main():
     #calculate_accuracy(training_data, mlm_model, tokenizer, device)
 
     # Train the model on the combined dataset
-    #training(mlm_model, dataloader, device)
+    training(mlm_model, dataloader, device)
 
     # test again on control data -- using a random token in each story
     #calculate_accuracy(training_data, mlm_model, tokenizer, device)
