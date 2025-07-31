@@ -1,0 +1,50 @@
+### Accuracy calculated across tests using random tokens on control data pre- and post- training using three epochs
+# Before training: 
+Accuracy is 59.72% on 72 sequences
+62.50% on 72 sequences when restricting masks to avoid special tokens or punctuation
+
+# - learning rate 1e-5
+Run 1. 66.67% on 72 sequences
+# - learning rate 3e-5
+ 75.00% on 72 sequences
+ 69.44% on 72 sequences
+
+# - learning rate 5e-5
+  80.56% on 72 sequences
+  73.61% on 72 sequences
+
+# -------------------------------------------------------------------
+# TODO: — we could then also compare whether word prediction suffers by unmasking all errors simultaneously, rather than predicting the first and using this as additional context for the remaining predictions
+ 
+### Accuracy on aphasia transcripts 
+-- This will be less effective due to disjoint sentences, repetition, and use of disjointed/not linked words
+ Predicting words that have been masked from error labeling -- all words are predicted simultaneously so have no impact on each other
+
+# Without training:
+ W01 --  42.86% on 7 sequences
+
+# After training on control data only
+ -- Learning rate 5-e5:
+ W01 -- 57.14% on 7 sequences after training
+'''Epoch: 0: 100%|██████████| 9/9 [05:53<00:00, 39.32s/it, loss=1.74]
+Epoch: 1: 100%|██████████| 9/9 [08:42<00:00, 58.10s/it, loss=1.82]
+Epoch: 2: 100%|██████████| 9/9 [06:26<00:00, 42.92s/it, loss=1.14]'''
+
+-- Learning rate 1-e5
+ W01 -- Accuracy: 57.14% on 7 sequences
+'''Epoch: 0: 100%|██████████| 9/9 [05:28<00:00, 36.50s/it, loss=2.01]
+Epoch: 1: 100%|██████████| 9/9 [05:36<00:00, 37.35s/it, loss=2.19]
+Epoch: 2: 100%|██████████| 9/9 [05:00<00:00, 33.40s/it, loss=1.37]'''
+
+# After training on repaired aphasia data only
+ -- Learning rate 5-e5:
+ W01: 42.86% on 7 sequences
+'''Epoch: 0: 100%|██████████| 2/2 [01:00<00:00, 30.16s/it, loss=3.42]
+Epoch: 1: 100%|██████████| 2/2 [01:01<00:00, 30.84s/it, loss=2.8]
+Epoch: 2: 100%|██████████| 2/2 [01:03<00:00, 31.76s/it, loss=2.91]'''
+
+-- Learning rate 1-e5
+ W01: 28.57% on 7 sequences
+'''Epoch: 0: 100%|██████████| 2/2 [00:52<00:00, 26.18s/it, loss=3.5]
+Epoch: 1: 100%|██████████| 2/2 [01:04<00:00, 32.04s/it, loss=2.92]
+Epoch: 2: 100%|██████████| 2/2 [00:54<00:00, 27.08s/it, loss=3.07]'''
