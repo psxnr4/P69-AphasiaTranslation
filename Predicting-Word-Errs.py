@@ -10,20 +10,21 @@
 
 # -- Training on the combined dataset on control and repaired aphasia transcripts
 # -- On W01 this gives accuracy of Accuracy: 71.43% on 7 sequences using learning rate 5e-05
-# -- Accuracy is 42.86% on 7 sequences before training
-'''Epoch: 0: 100%|██████████| 11/11 [08:04<00:00, 44.09s/it, loss=1.79]
-Epoch: 1: 100%|██████████| 11/11 [08:58<00:00, 48.97s/it, loss=1.91]
-Epoch: 2: 100%|██████████| 11/11 [13:12<00:00, 72.06s/it, loss=1.77]'''
+
 
 from transformers import BertTokenizer, BertForMaskedLM, pipeline
 import torch
 from tqdm.auto import tqdm
-from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed, DataCollatorForLanguageModeling
+from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed, DataCollatorForLanguageModeling #BERT mlm
+from transformers import BartForConditionalGeneration, BartTokenizer #BART paraphrase
+
 import pandas as pd
 import warnings
 import string
 import random
 from torch.utils.data import ConcatDataset
+from sklearn.model_selection import train_test_split
+
 
 input_file_path = 'Masked-transcript.txt'
 
@@ -35,6 +36,11 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 # Get BERT masked language model from Hugging Face
 mlm_model = BertForMaskedLM.from_pretrained('bert-base-uncased')
 mlm_model.eval()
+
+# Get BART paraphrase model from Hugging Face
+bart_model = BartForConditionalGeneration.from_pretrained('eugenesiow/bart-paraphrase')
+bart_tokenizer = BartTokenizer.from_pretrained('eugenesiow/bart-paraphrase')
+
 
 
 # Define training dataset
@@ -49,8 +55,23 @@ class TextDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return {key: val[idx] for key, val in self.encodings.items()}
 
+def get_training_data():
+    # Create dataset from the control transcripts
+    control_file_path = 'control_training_combined_output.cex'
+    control_dataset = prep_training_data(control_file_path)
 
-#Tokenise training data and create dataloader masking 15% of tokens
+    # Create dataset from the repaired aphasia transcripts
+    aphasia_file_path = 'aphasia_training_combined_output.cex'
+    aphasia_dataset = prep_training_data(aphasia_file_path)
+
+    # Concat datasets to prevent resetting the optimisers between training sets
+    combined_dataset = ConcatDataset([control_dataset, aphasia_dataset])
+    # Randomly mask tokens and prepare to be processed
+    dataloader = load_dataset(combined_dataset)
+
+    return dataloader
+
+# Read in training data from the given path, tokenise and create dataset
 def prep_training_data(file_path):
     # @ adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
     # Read test data
@@ -67,32 +88,13 @@ def prep_training_data(file_path):
         train_data, max_length=512, truncation=True, padding=True, return_tensors=None
     ) # keys: input_ids, token_type_ids, attention_mask
 
-    ''''# -- Create a mask over the data
-    random_tensor = torch.rand(inputs['input_ids'].shape)
-    print(inputs['input_ids'].shape, random_tensor.shape)
-
-    # Mask 15% of the data -- avoid masking special tokens:
-    # sentence boundaries [CLS] (token ID 101), [SEP] (token ID 102), and padding tokens (token ID 0)
-    masked_tensor = (random_tensor < 0.15) * (inputs['input_ids'] != 101) * (inputs['input_ids'] != 102) * (
-                inputs["input_ids"] != 0)
-
-    # Extract non-zero values and replace the corresponding tokens with the MASK value
-    nonzero_indices = [torch.nonzero(row).flatten().tolist() for row in masked_tensor]
-    tokenizer.convert_tokens_to_ids("[MASK]")
-
-    # Apply the mask
-    for i in range(len(inputs['input_ids'])):
-        inputs['input_ids'][i, nonzero_indices[i]] = 103
-'''
     # Create dataset to define how to load and batch the tokenized data
     dataset = TextDataset(inputs)
 
     return dataset
 
-# Concat datasets to prevent resetting the AdamW optimiser between training sets
-def combine_training_data(dataset1, dataset2):
-    combined_dataset = ConcatDataset([dataset1, dataset2])
 
+def load_dataset(dataset):
     # Hugging Face’s masking collator to automatically mask 15% of the tokens
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
@@ -101,11 +103,12 @@ def combine_training_data(dataset1, dataset2):
     )
 
     dataloader = torch.utils.data.DataLoader(
-        combined_dataset,
+        dataset,
         batch_size=16,
         shuffle=True,
         collate_fn=data_collator
     )
+
     return dataloader
 
 '''
@@ -151,7 +154,7 @@ def training(model, dataloader, device):
 
 
 # Mask random words within the data + predict them -- calculate success across all predictions
-def calculate_accuracy_on_dataset(data, model, tokenizer, device):
+def accuracy_random_tokens(data, model, tokenizer, device):
     # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
 
     model.eval() # Puts the model in evaluation mode
@@ -202,35 +205,42 @@ def calculate_accuracy_on_dataset(data, model, tokenizer, device):
 
 
 
-def get_masked_input():
+def run_BERT():
+    # Prepare input data
+    target_words, masked_sentences = get_masked_input_from_file()
+    # Tokenise sentences
+    encoded_inputs, input_ids, pos_masks = tokenise_input(masked_sentences)
+    # Pass into mlm model and output predictions for masked words
+    result, accuracy = output_results(target_words, masked_sentences, encoded_inputs, input_ids, pos_masks)
+
+    return result, accuracy
+
+
+
+def get_masked_input_from_file():
     # Define input sentence constructed from utterances
     with open(input_file_path, 'r', encoding='utf-8') as f:
         print('..Reading File..')
         # First line of file contains the target words that have been suggested for repairs
         target_words = f.readline().strip()
         target_words = target_words.split(',')
-
         # Read in the rest of the transcript
         masked_content = f.read()
 
-        #print(target_words)
-        #print(masked_content)
-
     return target_words, masked_content
+
 
 
 def tokenise_input(masked_sentences):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
     print('..Tokenising Input..')
-    # Tokenise sentences and encode -- incld. padding as sentences are different lengths
+    # Tokenise sentences and encode -- include padding as sentences are different lengths
     encoded_inputs = tokenizer(masked_sentences, return_tensors='pt', padding=True)
     input_ids = encoded_inputs["input_ids"]  # shape: [batch_size, sequence_length]
 
-    # Dynamically find [MASK] token positions in input sentence
+    # Dynamically find all [MASK] token positions in input sentence
     print('..Finding Masks..')
-    mask_token_id = tokenizer.mask_token_id  # This is 103 for BERT
-    pos_masks = [torch.where(seq == mask_token_id)[0].tolist() for seq in
-                 input_ids]  # 2d array -- list of indexes for mask tokens in each sentence
+    pos_masks = [torch.where(seq ==  tokenizer.mask_token_id)[0].tolist() for seq in input_ids]  # 2d array -- list of indexes for mask tokens in each sentence
 
     return encoded_inputs, input_ids, pos_masks
 
@@ -243,7 +253,10 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
     outputs = mlm_model(**encoded_inputs)
     # Get top-k word predictions for each masked token
     top_k = 5
+    accuracy = 0
+    unmasked_sentences = []
 
+    # For each sentence i, predict each mask in sentence
     for i, mask_positions in enumerate(pos_masks):
         # Display sentence and tokens
         #print('\n---- Sentence ', i + 1)
@@ -277,10 +290,8 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
             #input_ids[i, pos] = top_k_ids[0]
             # Get top prediction and store it with a highlight
             best_prediction = tokenizer.decode([top_k_ids[0].item()]).strip()
-            predicted_tokens.append(f"*{best_prediction}*")
-
-            #TODO: Compare target word to predicted word + keep running track of accuracy of run
-            #TODO: Compare accuracy pre and post training on random control tokens
+            #predicted_tokens.append(f"*{best_prediction}*")# highlight replaced word in output
+            predicted_tokens.append(f"{best_prediction}")
 
             if best_prediction == target_words[mask_num]:
                 correct += 1
@@ -290,8 +301,9 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
 
             print("predicted: ", best_prediction, "| original: ", target_words[mask_num])
             total += 1
-        accuracy = correct / total
-        print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
+        if total > 0:
+            accuracy = correct / total
+            print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
 
         # Repair sentence with predictions - Replace each mask token one by one
         unmasked_sentence = masked_sentences
@@ -302,43 +314,46 @@ def output_results(target_words, masked_sentences, encoded_inputs, input_ids, po
         #unmasked_sentence = tokenizer.decode(input_ids[i], skip_special_tokens=True)
         print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
 
+    return unmasked_sentence, accuracy
 
 
+def paraphrase_text(sentence):
+    # https://huggingface.co/eugenesiow/bart-paraphrase
+    
+    # summarizer = pipeline("translation", model="facebook/bart-large-cnn")
+    # print(summarizer(sentence, max_length=130, min_length=30, do_sample=False))
 
+    # sentence = "well he's going get school obvious . mom's telling him to take the umbrella . and he says no I don't need it . I'm gonna be alright . I'll go out . and oo it's raining . run back . I'm all wet . walk in . I'm drenched . changed my clothes . mom gives me the umbrella . and away I go to school . huh ?"
+    # print(sentence)
 
+    # Paraphrase output
+    print("Paraphrased text:")
+    batch = bart_tokenizer(sentence, return_tensors='pt')
+    generated_ids = bart_model.generate(batch['input_ids'])
+    generated_sentence = bart_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+    print(generated_sentence)
 
 
 def main():
-    # Create dataset from the control transcripts
-    control_file_path = 'control_training_combined_output.cex'
-    control_dataset = prep_training_data(control_file_path)
 
-    # Create dataset from the repaired aphasia transcripts
-    aphasia_file_path = 'aphasia_training_combined_output.cex'
-    aphasia_dataset = prep_training_data(aphasia_file_path)
-
-    dataloader = combine_training_data(control_dataset, aphasia_dataset)
-
-    # Setup model
-    mlm_model.eval()
+    # Setup models
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     mlm_model.to(device)  # Move the model to the device ("cpu" or "cuda")
+    bart_model.to(device)
 
-    # run model on random tokens in the control data + calculate produced accuracy
-    #calculate_accuracy(training_data, mlm_model, tokenizer, device)
-
-    # Train the model on the combined dataset
+    # Prepare training data and run training on the BERT model
+    dataloader = get_training_data()
     training(mlm_model, dataloader, device)
 
-    # test again on control data -- using a random token in each story
-    #calculate_accuracy(training_data, mlm_model, tokenizer, device)
+    # Run BERT on testing data
+    run_BERT()
+    
+    
+    # Run model on random tokens in the dataset + calculate overall produced accuracy
+    #accuracy_random_tokens(training_data, mlm_model, tokenizer, device)
 
-    # Prepare input data
-    target_words, masked_sentences = get_masked_input()
-    # Tokenise sentences
-    encoded_inputs, input_ids, pos_masks = tokenise_input(masked_sentences)
-    # Pass into mlm model and output predictions for masked words
-    output_results(target_words, masked_sentences, encoded_inputs, input_ids, pos_masks)
+    # Paraphrase output
+    #paraphrase_text(result)
 
 
 
