@@ -11,6 +11,10 @@
 # -- Training on the combined dataset on control and repaired aphasia transcripts
 # -- On W01 this gives accuracy of Accuracy: 71.43% on 7 sequences using learning rate 5e-05
 
+'''Predicted  6  out of  22
+Accuracy:  0.2727272727272727
+All accuracies:  [1.0, 0.4, 0.0, 0.0, 0.3333333333333333, 0.2857142857142857]'''
+
 
 import torch
 from tqdm.auto import tqdm
@@ -18,6 +22,8 @@ from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed  #BERT 
 from transformers import BartForConditionalGeneration, BartTokenizer      #BART paraphrase
 
 import warnings
+
+from typing_extensions import override
 
 # Python modules
 import TrainingData # TextDataset #LoadDataset #get_training_data -- returns training datasets
@@ -65,31 +71,26 @@ def training(model, dataloader, device):
             loop.set_postfix(loss=loss.item())  # Show loss in the progress bar
 
 
-def run_bert():
-    # Prepare test data
-    #test_file_path = '../masked_testing_williamson.txt'
-    #target_words = get_target_words(test_file_path)
 
-    # Create testing dataset
-    #test_dataset = TrainingData.dataset_from_file(test_file_path)
-    #print("Test dataset size: ", len(test_dataset))
+
+
+def run_bert():
 
     # Get a dataset containing the masked version of all transcripts within the training data directory
     test_dataset = MaskTranscript.mask_from_directory()
-
-
     # Batch this dataset to step through each data instance
     loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=1,
         shuffle=False
     )
-
     print("dataset loaded")
 
     # Keep track of module performance on each batch of data
     accuracies = []
     results = []
+    overall_correct_count = 0
+    overall_total = 0
 
     for batch in loader:
         # Get batch information
@@ -97,20 +98,13 @@ def run_bert():
         attention_mask = batch['attention_mask']
         encoded_inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
 
-        # Get attached info
-        #masked_text = batch['masked_sentence']
-        #target_words = batch['target_ids']
-
+        # Get attached information
         target_ids_list = []
         for i, target in enumerate(batch['target_ids']):
             target_ids_list = target.tolist()
 
-       # print("target words from batch: ", target_ids_list)
-
         # Get positions of each mask token
         pos_masks = [torch.where(seq ==  tokenizer.mask_token_id)[0].tolist() for seq in input_ids]  # 2d array -- list of indexes for mask tokens in each sentence
-
-        #get_test_labels(input_ids)
 
         # If no mask tokens have been found there's no need to run the model
         if pos_masks == [[]]:
@@ -118,20 +112,40 @@ def run_bert():
             unmasked_sentence = tokenizer.decode(encoded_inputs["input_ids"][0], skip_special_tokens=True)
             return unmasked_sentence
 
-        # Pass into mlm model and output predictions for masked words
-        result, accuracy = output_results(target_ids_list, encoded_inputs, pos_masks)
+        # Pass batch into mlm model
+        outputs = mlm_model(**encoded_inputs)
+        logits = outputs.logits
+        sequence_length = outputs.logits.shape[1]  # -- (batch_size, sequence_length, vocab_size)
 
-        # store outputs
-        results.append(result)
-        accuracies.append(accuracy)
+        # For each sentence i in the batch
+        for i, mask_positions in enumerate(pos_masks):
 
-    print("All accuracies: ", accuracies)
+            # logits for this sequence
+            seq_logits = logits[i]  # shape: (seq_length, vocab_size)
 
-    return results, accuracies
+            # Get sequence of token IDs from the batch
+            input_ids = encoded_inputs['input_ids'][i]
 
+            sequence_results(seq_logits, target_ids_list, mask_positions, input_ids)
 
+'''
+overall_correct_count += correct_count
+overall_total += total_count
 
+if overall_total > 0:
+    print("Predicted ", overall_correct_count, " out of ", overall_total)
+    print("Accuracy: ", overall_correct_count/overall_total)
 
+#if total > 0:
+#    accuracy = correct / total
+#    print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
+
+# store outputs
+results.append(result)
+accuracies.append(accuracy)
+
+print("All accuracies: ", accuracies)
+'''
 
 def display_predictions(logits, top_k ):
     # Softmax raw scores into probabilities
@@ -139,7 +153,7 @@ def display_predictions(logits, top_k ):
     # Get top-k word predictions for each masked token
     top_k_probs, top_k_ids = torch.topk(probs, top_k)
     # Display top scores
-    print("Top predictions to replace masked token:")
+    print("\n Top predictions to replace masked token:")
     for prob, token_id in zip(top_k_probs, top_k_ids):
         token_str = tokenizer.decode([token_id.item()]).strip()
         # tokens = tokenizer.convert_ids_to_tokens([token_id.item()])
@@ -149,80 +163,84 @@ def display_predictions(logits, top_k ):
 
 
 
-def output_results(target_words, encoded_inputs, pos_masks ):
+def evaluate(predicted_token_id, target_token_id):
+    # get token as a string
+    predicted_word = tokenizer.decode(predicted_token_id)
+    target_word = tokenizer.decode(target_token_id)
+
+    # Display top prediction
+    print("Suggested target word is : ", target_word, " : ", target_token_id)
+
+
+    if predicted_token_id == target_token_id:
+        print("Match! ")
+    else:
+        print("!!! No match: ")
+
+    print("predicted: ", predicted_word, "| original: ", target_word)
+    print("predicted: ", predicted_token_id, "| original: ", target_token_id)
+
+
+def print_highlighted_result(pred_tokens, org_sent):
+    print("Predicted tokens: ", pred_tokens)
+    # Repair sentence with predictions - Replace each mask token one by one
+    for predicted in pred_tokens:
+        org_sent = org_sent.replace(tokenizer.mask_token, f"\\*{predicted}\\*", 1)
+
+    return org_sent
+
+
+def sequence_results(seq_logits, target_words, mask_positions, input_ids ):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
-    print('..Passing into model..')
-    # Pass into MLM model and get raw score outputs
-    outputs = mlm_model(**encoded_inputs)
+    print('..Getting results..')
 
-    accuracy = 0
-    unmasked_sentence = tokenizer.decode(encoded_inputs["input_ids"][0], skip_special_tokens=True)
+    # Display sentence and tokens
+    #print('\n---- Sentence ', i + 1)
+    #print('Original:', masked_sentences[i])
+    #print('Tokenized:', tokenizer.tokenize(masked_sentences[i]))
+    #print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
 
-    # For each sentence i, predict each mask in sentence
-    for i, mask_positions in enumerate(pos_masks):
+    masked_sentence = tokenizer.decode(input_ids,  skip_special_tokens=False)
+    print("Masked sentence: ", masked_sentence)
 
-        # Skip sentence if there are no masked tokens
-        if  len(mask_positions) == 0:
-            continue
+    predicted_tokens = []
+    mask_num = 0
+    print('Target words:', target_words)
 
-        # Display sentence and tokens
-        #print('\n---- Sentence ', i + 1)
-        #print('Original:', masked_sentences[i])
-        #print('Tokenized:', tokenizer.tokenize(masked_sentences[i]))
-        #print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
+    # for each mask token in the sequence - get corresponding prediction and evaluate
+    for pos in mask_positions:
 
-        predicted_tokens = []
-        mask_num = -1
-        correct = 0
-        total = 0
-        print('Target words:', target_words)
+        # Get target word
+        target_token_id = target_words[mask_num]
+        mask_num += 1 # increment for next pass
 
-        sequence_length = outputs.logits.shape[1]
+        # Get raw prediction scores
+        token_logits = seq_logits[pos]
 
-        for pos in mask_positions:
-            mask_num += 1
+        # Display top k predictions to the console
+        #display_predictions(token_logits, 2)
 
-            # Get target word from list
-            target_token_id = target_words[mask_num]
-            target_word = tokenizer.decode(target_token_id)
+        # Get top prediction
+        predicted_token_id = token_logits.argmax().item()
+        predicted_word = tokenizer.decode(predicted_token_id)
+        predicted_tokens.append(f"{predicted_word}")
 
-            # Get raw prediction scores
-            logits = outputs.logits[i, pos]
-            # Get top prediction
-            predicted_token_id = logits.argmax().item()
-            predicted_word = tokenizer.decode(predicted_token_id)
+        # Evaluate the accuracy of the top prediction
+        evaluate(predicted_token_id, target_token_id)
 
-            # predicted_tokens.append(f"*{predicted_word}*") # highlight replaced word in output
-            predicted_tokens.append(f"{predicted_word}")
+        # Replace mask token with the top prediction
+        #input_ids[i, pos] = top_k_ids[0]
+        input_ids[pos] = predicted_token_id
 
-            # Display top predictions
-            print("\nSuggested target word is : ", target_word, " : ", target_token_id)
-
-            # Replace mask token with the top prediction #input_ids[i, pos] = top_k_ids[0]
-
-            if predicted_token_id == target_token_id:
-                correct += 1
-                print("Match! ")
-            else:
-                print("!!! No match: ")
-                display_predictions(logits, 2)
-                print("predicted: ", predicted_word, "| original: ", target_word)
-                print("predicted: ", predicted_token_id, "| original: ", target_token_id)
-            total += 1
-
-        if total > 0:
-            accuracy = correct / total
-            print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
-
-        # Repair sentence with predictions - Replace each mask token one by one
-        for predicted in predicted_tokens:
-            unmasked_sentence = unmasked_sentence.replace(tokenizer.mask_token, predicted, 1)
+        # Display new sentence with the predicted words highlighted
+        highlighted_result = print_highlighted_result(predicted_tokens, masked_sentence)
+        print(highlighted_result)
 
         # Decode repaired sentence from tokens
-        #unmasked_sentence = tokenizer.decode(input_ids[i], skip_special_tokens=True)
-        #print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
+        unmasked_sentence = tokenizer.decode(input_ids, skip_special_tokens=True)
+        print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
 
-    return unmasked_sentence, accuracy
+    return []
 
 
 
