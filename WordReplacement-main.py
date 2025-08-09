@@ -11,11 +11,6 @@
 # -- Training on the combined dataset on control and repaired aphasia transcripts
 # -- On W01 this gives accuracy of Accuracy: 71.43% on 7 sequences using learning rate 5e-05
 
-'''Predicted  6  out of  22
-Accuracy:  0.2727272727272727
-All accuracies:  [1.0, 0.4, 0.0, 0.0, 0.3333333333333333, 0.2857142857142857]'''
-
-
 import torch
 from tqdm.auto import tqdm
 from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed  #BERT mlm
@@ -270,3 +265,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
