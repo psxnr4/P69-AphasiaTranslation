@@ -63,12 +63,10 @@ def find_errors(line):
     #  - Followed by whitespace and an annotation \[: .*? \]
     pattern = r"(\b[\w'-]+\b)\s+\[:\s*.*?\]"
     err = re.findall(pattern, line)
-
     print("Word errors found: ", err)
 
     if len(err) == 0:
         return False
-
     print("error found")
     return err
 
@@ -98,11 +96,9 @@ def mask_from_directory( ):
 
             # Analyse each line separately
             for index in range(len(raw_gem)):
-
                 print('\n--Utterance ', index, '--')
                 print("Labelled : ", raw_gem[index])
                 print("Clean : ", flo_gem[index])
-
 
                 # New var for each line
                 target_ids_line = []
@@ -168,9 +164,7 @@ def mask_from_directory( ):
 
                                     # Store position of masked token
                                     masked_pos_file.append(flo_index)
-
                                     target_ids_line.append(targetid)
-
                                     mask_count +=1
 
                                     continue
@@ -201,20 +195,14 @@ def mask_from_directory( ):
 
     # -- END OF ALL FILES
     print("-- Files masked. --")
-
     # Write all data from this directory
     #write_to_file(all_target_words, all_masked_files, '../masked_testing_williamson.txt')
     # TODO: storing target words as tokenids rather than strings so there will be errors carried over
-
     print(all_target_words)
-
     # remove repeated words
     clean_all_masked_utts = remove_repetition(all_masked_utts)
-
     # Create dataset
-    dataset = write_to_dataset(all_masked_utts, all_target_words)
-
-
+    dataset = write_to_dataset(clean_all_masked_utts, all_target_words)
     return dataset
 
 
@@ -240,15 +228,12 @@ def write_to_dataset(all_masked_files, all_target_words):
     print('\n..Writing to dataset..')
     # Tokenise inputs
     input_encodings, mask_pos = tokenise_input(all_masked_files)
-
     # Create a dataset of the token encodings and link the masked strings
     dataset = TrainingData.TextDataset(input_encodings, all_target_words)
-
 
     print(f" -- Created Dataset size: {len(dataset)}")
     print(f"input_ids length: {len(input_encodings['input_ids'])}")
     print(f"target_ids length: {len(all_target_words)}")
-
 
     # Check first few items
     for i in range(1):
@@ -256,9 +241,6 @@ def write_to_dataset(all_masked_files, all_target_words):
         sample = dataset[i]
         for key, val in sample.items():
             print(f"{key}: {val}")
-
-
-
     return dataset
 
 
@@ -355,3 +337,4 @@ def remove_repetition(sentences):
 
 
 mask_from_directory()
+
