@@ -23,6 +23,7 @@ raw_gem_dir = main_dir + '/Raw Transcript'
 flo_gem_dir = main_dir + '/Flo Output'
 
 
+
 # Get gem output from file -- saved under name.umbrella.gem.cex in main raw_gem_dir
 def get_gem(filename):
     raw_gem_path = os.path.join(raw_gem_dir, filename)
@@ -54,6 +55,24 @@ def get_flo(filename):
     return flo_gem
 
 
+ # Find coding label for the repair and save the relevant token
+def find_errors(line):
+    # Match regex pattern:
+    #  - Capture a word (\b\w+\b)
+    #  - Word can contain ' or - chars
+    #  - Followed by whitespace and an annotation \[: .*? \]
+    pattern = r"(\b[\w'-]+\b)\s+\[:\s*.*?\]"
+    err = re.findall(pattern, line)
+
+    print("Word errors found: ", err)
+
+    if len(err) == 0:
+        return False
+
+    print("error found")
+    return err
+
+
 def mask_from_directory( ):
     print("Retrieving files from directory..")
     # Store across all files
@@ -61,13 +80,14 @@ def mask_from_directory( ):
     all_target_words = []
     all_mask_pos = []
     all_orig_files = []
+    all_masked_utts = []
     mask_count = 0
 
     # Get all .cex files in the directory
     for filename in os.listdir(raw_gem_dir):
         # Store across all lines in file
         target_words = []
-        masked_pos = []
+        masked_pos_file = []
         masked_file = ''
         orig_file = ''
 
@@ -78,28 +98,23 @@ def mask_from_directory( ):
 
             # Analyse each line separately
             for index in range(len(raw_gem)):
-                '''
+
                 print('\n--Utterance ', index, '--')
                 print("Labelled : ", raw_gem[index])
                 print("Clean : ", flo_gem[index])
-                '''
 
+
+                # New var for each line
+                target_ids_line = []
                 # remove error annotations on words
                 raw_gem[index] = raw_gem[index].replace('@u', '')
-
-                # Find coding label for the repair and save the relevant token
-                # Match regex pattern:
-                #  - Capture a word (\b\w+\b)
-                #  - Followed by whitespace and an annotation \[: .*? \]
-                pattern = r'(\b\w+\b)\s+\[:\s*.*?\]'
-                err = re.findall(pattern, raw_gem[index])
-                #print("Word errors found: ", err)
-
+                # keep track of all lines read
                 orig_file = orig_file + flo_gem[index] + ' '
 
-                # If no word error has been found then continue to next line
-                if len(err) == 0:
-                    masked_file = masked_file + flo_gem[index] + ' '
+                # Look for errors, if none are found skip to the next line
+                err = find_errors(raw_gem[index])
+                if not err:
+                    masked_file = masked_file + flo_gem[index] + ' ' # line can be added to masked file without changes
                     continue
 
                 # Split utterance at whitespace into tokens
@@ -152,7 +167,10 @@ def mask_from_directory( ):
                                     target_words.append(targetid)
 
                                     # Store position of masked token
-                                    masked_pos.append(flo_index)
+                                    masked_pos_file.append(flo_index)
+
+                                    target_ids_line.append(targetid)
+
                                     mask_count +=1
 
                                     continue
@@ -161,6 +179,9 @@ def mask_from_directory( ):
                 # Create the complete string by joining tokens in result_tokens
                 final_line = ' '.join(result_tokens)
                 #print('Masked : ', [final_line])
+
+                all_masked_utts.append(final_line)
+                all_target_words.append(target_ids_line)
 
                 # Append to the masked file
                 masked_file = masked_file + final_line + ' '
@@ -171,15 +192,15 @@ def mask_from_directory( ):
             # 1. masked sentence as a [string]
             all_masked_files.append(masked_file)
             # 2. target words as an [array]
-            all_target_words.append(target_words)
+            #all_target_words.append(target_words)
             # 3. mask positions as an [array]
-            all_mask_pos.append(masked_pos)
+            all_mask_pos.append(masked_pos_file)
             # 4. original sentence as a [string]
             all_orig_files.append(orig_file)
 
 
     # -- END OF ALL FILES
-    print("Files masked.")
+    print("-- Files masked. --")
 
     # Write all data from this directory
     #write_to_file(all_target_words, all_masked_files, '../masked_testing_williamson.txt')
@@ -187,8 +208,11 @@ def mask_from_directory( ):
 
     print(all_target_words)
 
+    # remove repeated words
+    clean_all_masked_utts = remove_repetition(all_masked_utts)
+
     # Create dataset
-    dataset = write_to_dataset(all_masked_files, all_target_words)
+    dataset = write_to_dataset(all_masked_utts, all_target_words)
 
 
     return dataset
@@ -198,7 +222,7 @@ def mask_from_directory( ):
 
 def tokenise_input(masked_sentences):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
-    print('..Tokenising Input..')
+    print('\n..Tokenising Input..')
     # Tokenise sentences and encode -- include padding as sentences are different lengths
     encoded_inputs = tokenizer(masked_sentences, return_tensors='pt', padding=True)
     input_ids = encoded_inputs["input_ids"]  # shape: [batch_size, sequence_length]
@@ -213,6 +237,7 @@ def tokenise_input(masked_sentences):
 
 
 def write_to_dataset(all_masked_files, all_target_words):
+    print('\n..Writing to dataset..')
     # Tokenise inputs
     input_encodings, mask_pos = tokenise_input(all_masked_files)
 
@@ -220,22 +245,25 @@ def write_to_dataset(all_masked_files, all_target_words):
     dataset = TrainingData.TextDataset(input_encodings, all_target_words)
 
 
-    print(f"Created Dataset size: {len(dataset)}")
+    print(f" -- Created Dataset size: {len(dataset)}")
+    print(f"input_ids length: {len(input_encodings['input_ids'])}")
+    print(f"target_ids length: {len(all_target_words)}")
 
-    '''
+
     # Check first few items
     for i in range(1):
         print(f"\n--- Sample {i} ---")
         sample = dataset[i]
         for key, val in sample.items():
             print(f"{key}: {val}")
-    '''
+
 
 
     return dataset
 
 
 def write_to_file( all_target_words, output_lines, output_path):
+    print('\n..Writing to file..')
     print(output_lines)
     with open(output_path, "w", encoding="utf-8") as file:
 
@@ -251,7 +279,7 @@ def write_to_file( all_target_words, output_lines, output_path):
 def get_target_words(file_path):
     # First line of file contains the target words that have been suggested for repairs
     with open(file_path, 'r', encoding='utf-8') as f:
-        print('..Reading File..')
+        print('\n ..Reading File..')
         target_words = f.readline().strip()
         target_words = target_words.split(',')
 
@@ -264,7 +292,7 @@ def get_target_words(file_path):
 def get_masked_input_from_file():
     # Define input sentence constructed from utterances
     with open('../Masked-transcript.txt', 'r', encoding='utf-8') as f:
-        print('..Reading File..')
+        print('\n ..Reading File..')
         # First line of file contains the target words that have been suggested for repairs
         target_words = f.readline().strip()
         target_words = target_words.split(',')
@@ -273,3 +301,57 @@ def get_masked_input_from_file():
 
     return target_words, [masked_content.strip()]
 
+
+# Analyse tokens for repeated words -- tokens: 1d tensor of ints
+'''
+def remove_repetition(tokens):
+    print('..Removing Repeated Words..')
+    if len(tokens) == 0:
+        return tokens
+
+    # Array to hold the new sentence
+    filtered = [tokens[0].item()]
+    # Check each token is different from the prev. and add to the new sentence
+    for tid in tokens[1:]:
+        if tid != filtered[-1]:
+            filtered.append(tid.item())
+
+
+    print('Filtered rep. :', tokens)
+    print('Decoded: ', tokenizer.decode(tokens))
+
+    return tokens
+'''
+
+# https://www.geeksforgeeks.org/dsa/remove-duplicate-words-from-sentence-using-regular-expression/
+def remove_repetition(sentences):
+    print('\n ..Removing Repeated Words..')
+    cleaned_sentences = []
+    num_rep_words = 2
+
+    # Regex to matching repeated words
+    # regex = r'\b(\w+)(?:\W+\1\b)+'
+    # Matches pattern within the two groups
+    # \b(\w+) - word of any length
+    # (?:\W+\1\b) - any word matching the word captured in prev. group \1
+
+    for sentence in sentences:
+        print("sent: ", sentence)
+        # Regex to match repeated phrases
+        # where n = number of sentences in repeated phrase
+        for n in range(num_rep_words, 0, -1):
+            regex = rf'\b((?:\w+\W+){{{n-1}}}\w+)(?:\W+\1\b)+'
+            # \w - word char ; \W - non-word char
+            # \b((?:\w+\W+){1}\w+) - capture sequence of two words to find repeated (word non-word){once} word
+            # \b((?:\w+\W+){0}\w+) - finds repetition of one word
+            # (?:\s+\1)+ -- look if followed by the same phrase again (at least once +)
+
+            sentence = re.sub(regex, r'\1', sentence, flags=re.IGNORECASE) # sub with first pattern
+
+        print("clean: ", sentence)
+        cleaned_sentences.append(sentence)
+
+    return cleaned_sentences
+
+
+mask_from_directory()
