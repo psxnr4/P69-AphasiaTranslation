@@ -83,7 +83,7 @@ def find_error_position(orig_tokens, flo_tokens, err ):
     # Step through Sequence Matcher analysis
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         # Display analysis nicely
-        print('{:7}   a[{}:{}] --> b[{}:{}] {!r:>8} --> {!r}'.format(tag, i1, i2, j1, j2, orig_tokens[i1:i2], flo_tokens[j1:j2]))
+        #print('{:7}   a[{}:{}] --> b[{}:{}] {!r:>8} --> {!r}'.format(tag, i1, i2, j1, j2, orig_tokens[i1:i2], flo_tokens[j1:j2]))
         '''
         Example output:
         equal a[0:9] --> b[0:9]['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat'] --> ['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat']
@@ -100,7 +100,7 @@ def find_error_position(orig_tokens, flo_tokens, err ):
             flo_index = j1 + block_len
             # If the word is in the error list then it is likely incorrect
             if last_match in err:
-                print("error found ", last_match)
+                #print("error found ", last_match)
                 # Check that the next token in the original utterance is an error label
                 if i1 + block_len + 1 < len(orig_tokens):
                     next_token = orig_tokens[i1 + block_len + 1]  # this should be '[:'
@@ -117,7 +117,7 @@ def find_error_position(orig_tokens, flo_tokens, err ):
                         target_ids_line.append(targetid)
                         continue
 
-    print("result tokens: ", result_tokens, "\n")
+    #print("result tokens: ", result_tokens, "\n")
     return result_tokens, target_ids_line
 
 
@@ -129,17 +129,21 @@ def mask_from_directory( ):
     all_target_words = []
     all_orig_files = []
     all_masked_utts = []
+    all_files_w_context = []
 
     # Get all .cex files in the directory
     for filename in os.listdir(raw_gem_dir):
         # Store across all lines in file
-        masked_file = ''
+        masked_file = []
         orig_file = ''
 
         if filename.endswith('.cex'):
             # Use filename in directory to navigate the needed transcript parts
             raw_gem = get_gem(filename)
             flo_gem = get_flo(filename)
+
+            # remove repeated words
+            flo_gem = remove_repetition(flo_gem)
 
             # Analyse each line separately
             for index in range(len(raw_gem)):
@@ -159,7 +163,7 @@ def mask_from_directory( ):
                 # Look for errors, if none are found skip to the next line
                 err = find_errors(raw_gem[index])
                 if not err:
-                    masked_file = masked_file + flo_gem[index] + ' ' # line can be added to masked file without changes
+                    masked_file.append(flo_gem[index]) # line can be added to masked file without changes
                     continue
 
                 # Split utterance at whitespace into tokens
@@ -176,11 +180,12 @@ def mask_from_directory( ):
                 final_line = ' '.join(result_tokens)
                 #print('Masked : ', [final_line])
 
+                # Add to array of all utterances
                 all_masked_utts.append(final_line)
                 all_target_words.append(target_ids_line)
 
                 # Append to the masked file
-                masked_file = masked_file + final_line + ' '
+                masked_file.append(final_line)
                 #print(masked_file)
 
              # -- END OF FILE
@@ -190,20 +195,79 @@ def mask_from_directory( ):
             # original sentence as a [string]
             all_orig_files.append(orig_file)
 
+            print("MASKED FILE: ", masked_file)
+            # Introduce context to the utterances
+            utterances = add_context(masked_file, 12) # param: array of strings # output: string
+            print(utterances)
+            all_files_w_context.extend(utterances) # add utterances from this file to the array of all expanded-utterances seen so far
+
 
     # -- END OF ALL FILES
-    print("-- Files masked. --")
+    print("\n-- Files masked. --")
 
     # Write all data from this directory
     #write_to_file(all_target_words, all_masked_files, '../masked_testing_williamson.txt')
     # TODO: storing target words as tokenids rather than strings so there will be errors carried over
     print("Target words: ", all_target_words)
 
-    # remove repeated words
-    clean_all_masked_utts = remove_repetition(all_masked_utts)
+    print("\n\nALL FILES: ", all_files_w_context)
+    print("FILES type:", type(all_files_w_context))
+    print("first element:", all_files_w_context[0] if all_files_w_context else None)
+
     # Create dataset
-    dataset = write_to_dataset(clean_all_masked_utts, all_target_words)
+    dataset = write_to_dataset(all_files_w_context, all_target_words)
     return dataset
+
+
+# Add previous and trailing lines to each utterance to introduce context
+# text: array of strings
+def add_context(text, min_size):
+
+    text_w_context = []
+    for index in range(len(text)):
+        line = text[index]
+        if not '[MASK]' in line:
+            continue
+        print("\n")
+        print(line)
+        print("\n")
+
+        # Work with the lines as an array of words
+        line_w_context = line.split()
+        length = len(line_w_context)
+        # Counter to ensure context is added from both sides until the length limit is reached
+        buffer = 1
+        while length < min_size:
+            # Check that we are not going past the boundaries of the text
+            # Get the lines before and after this line in the text
+            if index - buffer > 0:
+                prev_line = text[index - buffer].split()
+            else:
+                prev_line = [] # reset to remove prev. value + append no additional info
+            #print("PRE at index: ", index - buffer, ": ", prev_line, "--len ", len(prev_line))
+            #print("line at index: ", index, ": ", text[index], "--len ", len(text[index].split()))
+            if index + buffer < len(text):
+                next_line = text[index + buffer].split()
+            else:
+                next_line = ['m']
+            #print("POST:at index: ", index + buffer, ": ", next_line, "--len ", len(next_line))
+            buffer = buffer + 1
+
+            # Concatenate the parts of the texts surrounding the masked line
+            line_w_context = prev_line + line_w_context + next_line
+            length = len(line_w_context)
+
+
+            #print("total length: ", len(prev_line) + len(text[index].split()) + len(next_line))
+        print(line_w_context, length)
+
+        # Join the combined lines into a single string and add to array
+        final_line = ' '.join(line_w_context)
+        text_w_context.append(final_line)
+    #print("TEXT WITH CONTEXT: ", text_w_context)
+
+    return text_w_context
+
 
 
 
@@ -211,6 +275,10 @@ def mask_from_directory( ):
 def tokenise_input(masked_sentences):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
     print('\n..Tokenising Input..')
+
+    print("masked_sentences type:", type(masked_sentences))
+    print("first element:", masked_sentences[0] if masked_sentences else None)
+
     # Tokenise sentences and encode -- include padding as sentences are different lengths
     encoded_inputs = tokenizer(masked_sentences, return_tensors='pt', padding=True)
     input_ids = encoded_inputs["input_ids"]  # shape: [batch_size, sequence_length]
