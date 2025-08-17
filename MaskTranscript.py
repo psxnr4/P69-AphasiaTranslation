@@ -63,12 +63,63 @@ def find_errors(line):
     #  - Followed by whitespace and an annotation \[: .*? \]
     pattern = r"(\b[\w'-]+\b)\s+\[:\s*.*?\]"
     err = re.findall(pattern, line)
-    print("Word errors found: ", err)
+    #print("Word errors found: ", err)
 
     if len(err) == 0:
         return False
-    print("error found")
+    #print("error found")
     return err
+
+
+def find_error_position(orig_tokens, flo_tokens, err ):
+    # Define result_tokens string from this line using clean utterance as a base
+    result_tokens = flo_tokens[:]
+    target_ids_line = []
+
+    matcher = difflib.SequenceMatcher(None, orig_tokens, flo_tokens)
+    # -- https://docs.python.org/3/library/difflib.html
+    # -- "Return list of 5-tuples describing how to turn a into b. Each tuple is of the form (tag, i1, i2, j1, j2)." Tag is a string: 'replace', 'delete', 'insert', 'equal'
+
+    # Step through Sequence Matcher analysis
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        # Display analysis nicely
+        print('{:7}   a[{}:{}] --> b[{}:{}] {!r:>8} --> {!r}'.format(tag, i1, i2, j1, j2, orig_tokens[i1:i2], flo_tokens[j1:j2]))
+        '''
+        Example output:
+        equal a[0:9] --> b[0:9]['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat'] --> ['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat']
+        delete a[9:11] --> b[9:9]['[:', 'umbrella]'] --> []
+        '''
+
+        # Find the block of tokens that match between the raw + clean utterance
+        # The last token in this block will be the erroneous word - as
+        if tag == 'equal':
+            # Get size of block to find the last token
+            block_len = i2 - i1 - 1
+            last_match = orig_tokens[i1 + block_len]
+            # Get corresponding index in the cleaned utterance
+            flo_index = j1 + block_len
+            # If the word is in the error list then it is likely incorrect
+            if last_match in err:
+                print("error found ", last_match)
+                # Check that the next token in the original utterance is an error label
+                if i1 + block_len + 1 < len(orig_tokens):
+                    next_token = orig_tokens[i1 + block_len + 1]  # this should be '[:'
+                    if next_token.startswith('[:'):
+                        err.remove(last_match)
+                        # Replace this token in the line with a mask token
+                        result_tokens[flo_index] = tokenizer.mask_token
+
+                        # Get target word from list of string tokens
+                        target = orig_tokens[i1 + block_len + 2]  # this will be 'word]'
+                        target = target[:-1]  # remove last char
+                        # Get token ID to store value
+                        targetid = tokenizer.convert_tokens_to_ids(target)
+                        target_ids_line.append(targetid)
+                        continue
+
+    print("result tokens: ", result_tokens, "\n")
+    return result_tokens, target_ids_line
+
 
 
 def mask_from_directory( ):
@@ -76,16 +127,12 @@ def mask_from_directory( ):
     # Store across all files
     all_masked_files = []
     all_target_words = []
-    all_mask_pos = []
     all_orig_files = []
     all_masked_utts = []
-    mask_count = 0
 
     # Get all .cex files in the directory
     for filename in os.listdir(raw_gem_dir):
         # Store across all lines in file
-        target_words = []
-        masked_pos_file = []
         masked_file = ''
         orig_file = ''
 
@@ -96,9 +143,11 @@ def mask_from_directory( ):
 
             # Analyse each line separately
             for index in range(len(raw_gem)):
+                '''
                 print('\n--Utterance ', index, '--')
                 print("Labelled : ", raw_gem[index])
                 print("Clean : ", flo_gem[index])
+                '''
 
                 # New var for each line
                 target_ids_line = []
@@ -114,60 +163,13 @@ def mask_from_directory( ):
                     continue
 
                 # Split utterance at whitespace into tokens
-                orig_tokens = raw_gem[index].split()
                 # -- Produces Utterance with error coding + target word suggestion e.g. ['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat', '[:', 'umbrella]' ]
-                flo_tokens = flo_gem[index].split()
+                orig_tokens = raw_gem[index].split()
                 # -- Produces Cleaned version of the utterance without repairs e.g.  ['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat']
-
-                # Define result_tokens string from this line using clean utterance as a base
-                result_tokens = flo_tokens[:]
+                flo_tokens = flo_gem[index].split()
 
                 # Find position in flo-output that corresponds to the highlighted word error
-                matcher = difflib.SequenceMatcher(None, orig_tokens, flo_tokens)
-                # -- https://docs.python.org/3/library/difflib.html
-                # -- "Return list of 5-tuples describing how to turn a into b. Each tuple is of the form (tag, i1, i2, j1, j2)." Tag is a string: 'replace', 'delete', 'insert', 'equal'
-
-                # Step through Sequence Matcher analysis
-                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                    # Display analysis nicely
-                    #print('{:7}   a[{}:{}] --> b[{}:{}] {!r:>8} --> {!r}'.format(tag, i1, i2, j1, j2, orig_tokens[i1:i2], flo_tokens[j1:j2]))
-                    '''
-                    Example output:
-                    equal a[0:9] --> b[0:9]['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat'] --> ['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat']
-                    delete a[9:11] --> b[9:9]['[:', 'umbrella]'] --> []
-                    '''
-
-                    # Find the block of tokens that match between the raw + clean utterance
-                    # The last token in this block will be the erroneous word - as
-                    if tag == 'equal':
-                        # Get size of block to find the last token
-                        block_len = i2 - i1 -1
-                        last_match = orig_tokens[i1 + block_len]
-                        # Get corresponding index in the cleaned utterance
-                        flo_index = j1 + block_len
-                        # If the word is in the error list then it is likely incorrect
-                        if last_match in err:
-                            # Check that the next token in the original utterance is an error label
-                            if i1 + block_len + 1< len(orig_tokens):
-                                next_token = orig_tokens[i1 + block_len + 1] # this should be '[:'
-                                if next_token.startswith('[:'):
-                                    # Replace this token in the line with a mask token
-                                    result_tokens[flo_index] = tokenizer.mask_token
-                                    err.remove(last_match)
-
-                                    # Get target word from list of string tokens
-                                    target = orig_tokens[i1 + block_len + 2] # this will be 'word]'
-                                    target = target[:-1] # remove last char
-                                    # Get token ID to store value
-                                    targetid = tokenizer.convert_tokens_to_ids(target)
-                                    target_words.append(targetid)
-
-                                    # Store position of masked token
-                                    masked_pos_file.append(flo_index)
-                                    target_ids_line.append(targetid)
-                                    mask_count +=1
-
-                                    continue
+                result_tokens, target_ids_line = find_error_position(orig_tokens, flo_tokens, err)
 
                 # -- END OF LINE
                 # Create the complete string by joining tokens in result_tokens
@@ -182,23 +184,21 @@ def mask_from_directory( ):
                 #print(masked_file)
 
              # -- END OF FILE
-            # Each line in this file has been collated to:
-            # 1. masked sentence as a [string]
+            # Each line in this file collated to
+            # masked sentence as a [string]
             all_masked_files.append(masked_file)
-            # 2. target words as an [array]
-            #all_target_words.append(target_words)
-            # 3. mask positions as an [array]
-            all_mask_pos.append(masked_pos_file)
-            # 4. original sentence as a [string]
+            # original sentence as a [string]
             all_orig_files.append(orig_file)
 
 
     # -- END OF ALL FILES
     print("-- Files masked. --")
+
     # Write all data from this directory
     #write_to_file(all_target_words, all_masked_files, '../masked_testing_williamson.txt')
     # TODO: storing target words as tokenids rather than strings so there will be errors carried over
-    print(all_target_words)
+    print("Target words: ", all_target_words)
+
     # remove repeated words
     clean_all_masked_utts = remove_repetition(all_masked_utts)
     # Create dataset
@@ -228,6 +228,7 @@ def write_to_dataset(all_masked_files, all_target_words):
     print('\n..Writing to dataset..')
     # Tokenise inputs
     input_encodings, mask_pos = tokenise_input(all_masked_files)
+
     # Create a dataset of the token encodings and link the masked strings
     dataset = TrainingData.TextDataset(input_encodings, all_target_words)
 
@@ -235,12 +236,14 @@ def write_to_dataset(all_masked_files, all_target_words):
     print(f"input_ids length: {len(input_encodings['input_ids'])}")
     print(f"target_ids length: {len(all_target_words)}")
 
+    '''
     # Check first few items
     for i in range(1):
         print(f"\n--- Sample {i} ---")
         sample = dataset[i]
         for key, val in sample.items():
             print(f"{key}: {val}")
+    '''
     return dataset
 
 
@@ -318,7 +321,7 @@ def remove_repetition(sentences):
     # (?:\W+\1\b) - any word matching the word captured in prev. group \1
 
     for sentence in sentences:
-        print("sent: ", sentence)
+        #print("sent: ", sentence)
         # Regex to match repeated phrases
         # where n = number of sentences in repeated phrase
         for n in range(num_rep_words, 0, -1):
@@ -330,11 +333,10 @@ def remove_repetition(sentences):
 
             sentence = re.sub(regex, r'\1', sentence, flags=re.IGNORECASE) # sub with first pattern
 
-        print("clean: ", sentence)
+        print(sentence)
         cleaned_sentences.append(sentence)
 
     return cleaned_sentences
 
 
 mask_from_directory()
-
