@@ -122,7 +122,7 @@ def find_error_position(orig_tokens, flo_tokens, err ):
 
 
 
-def mask_from_directory( ):
+def mask_from_directory( minimum_context_length ):
     print("Retrieving files from directory..")
     # Store across all files
     all_masked_files = []
@@ -196,7 +196,7 @@ def mask_from_directory( ):
             all_orig_files.append(orig_file)
 
             # Introduce context to the utterances
-            utterances = add_context(masked_file, 12) # param: array of strings # output: string
+            utterances = add_context(masked_file, minimum_context_length) # param: array of strings # output: string
             all_files_w_context.extend(utterances) # add utterances from this file to the array of all expanded-utterances seen so far
 
 
@@ -336,27 +336,7 @@ def get_masked_input_from_file():
     return target_words, [masked_content.strip()]
 
 
-# Analyse tokens for repeated words -- tokens: 1d tensor of ints
-'''
-def remove_repetition(tokens):
-    print('..Removing Repeated Words..')
-    if len(tokens) == 0:
-        return tokens
-
-    # Array to hold the new sentence
-    filtered = [tokens[0].item()]
-    # Check each token is different from the prev. and add to the new sentence
-    for tid in tokens[1:]:
-        if tid != filtered[-1]:
-            filtered.append(tid.item())
-
-
-    print('Filtered rep. :', tokens)
-    print('Decoded: ', tokenizer.decode(tokens))
-
-    return tokens
-'''
-
+#
 # https://www.geeksforgeeks.org/dsa/remove-duplicate-words-from-sentence-using-regular-expression/
 def remove_repetition(sentences):
     print('\n ..Removing Repeated Words..')
@@ -387,5 +367,3 @@ def remove_repetition(sentences):
 
     return cleaned_sentences
 
-
-mask_from_directory()
