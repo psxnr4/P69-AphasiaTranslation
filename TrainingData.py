@@ -37,30 +37,31 @@ class TextDataset(torch.utils.data.Dataset):
         return item
 
 
+# Get suitable datasets from hardcoded directories based on passed flags
+def get_training_data( control_data_flag, aphasia_data_flag, minimum_context_length):
+    datasets = []
 
-def get_training_data():
-    # Create dataset from the control transcripts
-    #control_file_path = '../control_training_combined_output.cex'
-    #control_dataset = dataset_from_file(control_file_path)
+    if control_data_flag:
+        print("Getting control data..")
+        control_dataset = dataset_from_directory(control_directory, minimum_context_length)
+        datasets.append(control_dataset)
 
-    # Create dataset from the repaired aphasia transcripts
-    #aphasia_file_path = '../aphasia_training_combined_output.cex'
-    #aphasia_dataset = dataset_from_file(aphasia_file_path)
+    if aphasia_data_flag:
+        print("Getting aphasia data..")
+        aphasia_dataset = dataset_from_directory(aphasia_directory, minimum_context_length)
+        datasets.append(aphasia_dataset)
 
-    print("Getting control data")
-    control_dataset = dataset_from_directory(control_directory)
-    print("Getting aphasia data")
-    aphasia_dataset = dataset_from_directory(aphasia_directory)
-
+    # Combine if more than one, else use single dataset
     # Concat datasets to prevent resetting the optimisers between training sets
-    combined_dataset = ConcatDataset([control_dataset, aphasia_dataset])
+    final_dataset = ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
+
     # Randomly mask tokens and prepare to be processed
-    dataloader = load_dataset(combined_dataset)
+    dataloader = load_dataset(final_dataset)
     return dataloader
 
 
 
-def dataset_from_directory(dir_path):
+def dataset_from_directory(dir_path, minimum_context_length):
     # Create 2d array of all data
     all_data = []
     # Get all .cex files in the directory
@@ -72,7 +73,7 @@ def dataset_from_directory(dir_path):
             # Separate each utterance to be processed individually
             data = data.split('\n')
             # Add context to each utterance
-            data_w_context = add_context(data,12)
+            data_w_context = add_context(data, minimum_context_length)
             all_data.extend(data_w_context)
 
     print(type(all_data), len(all_data))
