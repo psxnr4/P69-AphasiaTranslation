@@ -214,6 +214,7 @@ def mask_from_directory( ):
 
 
 # Add previous and trailing lines to each utterance to introduce context
+# Build an adaptive context window around the masked line of at least min number of words
 # text: array of strings
 def add_context(text, min_size):
     # Remove empty lines
@@ -225,29 +226,23 @@ def add_context(text, min_size):
         # Only add context to utterances with a mask token
         if not '[MASK]' in line:
             continue
-        
+
         # Work with the lines as an array of words
         line_w_context = line.split()
         length = len(line_w_context)
         # Counter to ensure context is added from both sides until the length limit is reached
         buffer = 1
         while length < min_size:
-            # Check that we are not going past the boundaries of the text
+            # Check that we are not going past the boundaries of the text if so reset to remove prev. value + append no additional info
             # Get the lines before and after this line in the text
-            if index - buffer > 0:
-                prev_line = text[index - buffer].split()
-            else:
-                prev_line = [] # reset to remove prev. value + append no additional info
-            if index + buffer < len(text):
-                next_line = text[index + buffer].split()
-            else:
-                next_line = []
+            prev_line = text[index - buffer].split() if index - buffer >= 0 else []
+            next_line = text[index + buffer].split() if index + buffer < len(text) else []
             buffer = buffer + 1
 
             # Concatenate the parts of the texts surrounding the masked line
             line_w_context = prev_line + ['[SEP]'] + line_w_context + ['[SEP]'] + next_line
             length = len(line_w_context)
-            
+
         # Join the combined lines into a single string and add to array
         final_line = ' '.join(line_w_context)
         text_w_context.append(final_line)
@@ -298,14 +293,6 @@ def write_to_dataset(all_masked_files, all_target_words):
     print(f"input_ids length: {len(input_encodings['input_ids'])}")
     print(f"target_ids length: {len(all_target_words)}")
 
-    '''
-    # Check first few items
-    for i in range(1):
-        print(f"\n--- Sample {i} ---")
-        sample = dataset[i]
-        for key, val in sample.items():
-            print(f"{key}: {val}")
-    '''
     return dataset
 
 
