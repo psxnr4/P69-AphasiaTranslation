@@ -30,6 +30,13 @@ import TrainingData # TextDataset #LoadDataset #get_training_data -- returns tra
 import MaskTranscript # mask_from_directory -- masks training data stored in a given directory and returns dataset
                         # Tokenise input
 
+# ---- SET UP
+minimum_context_length = 12         # word length of input utterance -- adds context from either side to reach length restriction
+use_control_training_data = False    # train the model on situational control data
+use_aphasia_training_data = False    # train the model on aphasia data
+
+
+# ------ MODELS
 set_seed(42)
 warnings.filterwarnings("ignore")
 
@@ -296,13 +303,14 @@ def main():
     mlm_model.to(device)  # Move the model to the device ("cpu" or "cuda")
     bart_model.to(device)
 
-    # Prepare training data and run training on the BERT model
-    dataloader = TrainingData.get_training_data()
-    #training(mlm_model, dataloader, device)
+    if use_control_training_data or use_aphasia_training_data:
+        # Prepare training data and run training on the BERT model
+        dataloader = TrainingData.get_training_data(use_control_training_data, use_aphasia_training_data, minimum_context_length)
+        training(mlm_model, dataloader, device)
 
     # Prepare testing data
     # Get a dataset containing the masked version of all transcripts within the training data directory
-    test_dataset = MaskTranscript.mask_from_directory()
+    test_dataset = MaskTranscript.mask_from_directory(minimum_context_length)
     
     # Batch this dataset to step through each data instance
     loader = torch.utils.data.DataLoader(
