@@ -11,12 +11,17 @@
 # -- Training on the combined dataset on control and repaired aphasia transcripts
 # -- On W01 this gives accuracy of Accuracy: 71.43% on 7 sequences using learning rate 5e-05
 
+
+
 import torch
 from tqdm.auto import tqdm
 from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed  #BERT mlm
 from transformers import BartForConditionalGeneration, BartTokenizer      #BART paraphrase
 
 import warnings
+import string
+import nltk
+from nltk.corpus import wordnet # Detect synonyms https://www.geeksforgeeks.org/python/get-synonymsantonyms-nltk-wordnet-python/
 
 from typing_extensions import override
 
@@ -69,25 +74,18 @@ def training(model, dataloader, device):
 
 
 
-def run_bert():
-
-    # Get a dataset containing the masked version of all transcripts within the training data directory
-    test_dataset = MaskTranscript.mask_from_directory()
-    # Batch this dataset to step through each data instance
-    loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=1,
-        shuffle=False
-    )
-    print("dataset loaded")
+def run_bert(loader):
 
     # Keep track of module performance on each batch of data
-    accuracies = []
-    results = []
-    overall_correct_count = 0
-    overall_total = 0
+    correct_count = 0
+    total_count = 0
+    accuracy = 0
+    valid = False
 
+    n = 0
     for batch in loader:
+        print(f" \n***** utterance batch {n}  ***** \n -------------------------------------")
+        n +=1
         # Get batch information
         input_ids = batch['input_ids']
         attention_mask = batch['attention_mask']
@@ -105,7 +103,9 @@ def run_bert():
         if pos_masks == [[]]:
             print("-- No mask tokens found --")
             unmasked_sentence = tokenizer.decode(encoded_inputs["input_ids"][0], skip_special_tokens=True)
-            return unmasked_sentence
+            print(encoded_inputs["input_ids"][0])
+            print(unmasked_sentence)
+            continue
 
         # Pass batch into mlm model
         outputs = mlm_model(**encoded_inputs)
@@ -114,33 +114,37 @@ def run_bert():
 
         # For each sentence i in the batch
         for i, mask_positions in enumerate(pos_masks):
-
+            print("mask_positions", mask_positions)
             # logits for this sequence
             seq_logits = logits[i]  # shape: (seq_length, vocab_size)
 
             # Get sequence of token IDs from the batch
             input_ids = encoded_inputs['input_ids'][i]
 
-            sequence_results(seq_logits, target_ids_list, mask_positions, input_ids)
+            # for each mask token in the sequence - get corresponding prediction and evaluate
+            count = 0
+            for pos in mask_positions:
+                print(f"\n ***** mask num {count}  ***** ")
+                count +=1
+                predicted_token_id, target_token_id, unmasked_sentence = sequence_results(seq_logits, target_ids_list, pos, input_ids)
+                # Evaluate the accuracy of the top prediction - if prediction has been made
+                if predicted_token_id and target_token_id:
+                    valid = evaluate_prediction(predicted_token_id, target_token_id, unmasked_sentence)
+                else:
+                    continue
 
-'''
-overall_correct_count += correct_count
-overall_total += total_count
+                if valid:
+                    correct_count += 1
+                total_count += 1
 
-if overall_total > 0:
-    print("Predicted ", overall_correct_count, " out of ", overall_total)
-    print("Accuracy: ", overall_correct_count/overall_total)
+    if total_count > 0:
+        accuracy = correct_count / total_count
+        print(f"\n ------------------------------ \n ------------------------------")
+        print(f"Accuracy: {accuracy * 100:.2f}% on {total_count} sequences")
+        print(f"------------------------------ \n ------------------------------")
 
-#if total > 0:
-#    accuracy = correct / total
-#    print(f"\n Accuracy: {accuracy * 100:.2f}% on {total} sequences")
+    return accuracy
 
-# store outputs
-results.append(result)
-accuracies.append(accuracy)
-
-print("All accuracies: ", accuracies)
-'''
 
 def display_predictions(logits, top_k ):
     # Softmax raw scores into probabilities
@@ -158,34 +162,83 @@ def display_predictions(logits, top_k ):
 
 
 
-def evaluate(predicted_token_id, target_token_id):
+def evaluate_prediction(predicted_token_id, target_token_id, unmasked_sentence):
     # get token as a string
     predicted_word = tokenizer.decode(predicted_token_id)
     target_word = tokenizer.decode(target_token_id)
 
     # Display top prediction
-    print("Suggested target word is : ", target_word, " : ", target_token_id)
+    #print("Suggested target word is : ", target_word, " : ", target_token_id)
+    print("predicted: ", predicted_word, "| original: ", target_word)
+    #print("predicted: ", predicted_token_id, "| original: ", target_token_id)
 
-
+    # Accept an exact match
     if predicted_token_id == target_token_id:
         print("Match! ")
-    else:
-        print("!!! No match: ")
+        return True
 
-    print("predicted: ", predicted_word, "| original: ", target_word)
-    print("predicted: ", predicted_token_id, "| original: ", target_token_id)
+    # If not an exact match, check if prediction is a synonym of target
+    score = check_synonyms(predicted_word, target_word, unmasked_sentence)
+    if score > 0.75:
+        print("Synonym of score: ", score)
+        return True
+    else:
+        print("!!! No match ")
+        return False
+
+
+def check_synonyms(predicted, target, sentence):
+    # adapted from https://www.geeksforgeeks.org/python/get-synonymsantonyms-nltk-wordnet-python/
+
+    # get position in sentence  - remove punctuation as this hides the word
+    cleaned_text = sentence.translate(str.maketrans('', '', string.punctuation))
+    words = cleaned_text.split()
+    #print("sentence: ", words)
+    # If prediction is not in the sentence then exit error
+    if predicted not in words:
+        return False
+    pos = words.index(predicted)
+
+    # Use the completed sentence to extract 'part-of-speech' tag to evaluate the selected words within the given context
+    tagged = nltk.pos_tag(words)
+    tagged_predicted = tagged[pos]
+
+    # Get POS type from nlkt tag -- https://www.nltk.org/book/ch05.html
+    #print(nltk.pos_tag([target]))
+    if tagged_predicted[1] in ["PRP", "PRP$", "WP", "WP$"]:
+        print("Word is a pronoun - cannot check synonyms")
+        return False
+
+    # Convert to a synsets object by getting the first item from the list of word definitions
+    # take None if the word is not found in wordnet - e.g. wordnet does not include pronouns
+    syns_word1 = wordnet.synsets(predicted)[0] if wordnet.synsets(predicted) else None
+    syns_word2 = wordnet.synsets(target)[0] if wordnet.synsets(target) else None
+
+    print("-- Checking synonyms between ", syns_word1, " and ", syns_word2)
+
+    # If both words have been found then calculate similarity
+    if syns_word1 and syns_word2:
+        syns_score = syns_word1.wup_similarity(syns_word2)
+        print("-- Synonyms score: ", syns_score)
+        return syns_score
+    else:
+        print("-- Word has not been found in wordnet")
+        return False
+
+# todo: could also test to see if target is in syn set of predicted word
+
+
 
 
 def print_highlighted_result(pred_tokens, org_sent):
-    print("Predicted tokens: ", pred_tokens)
+    #print("Predicted tokens: ", pred_tokens)
     # Repair sentence with predictions - Replace each mask token one by one
     for predicted in pred_tokens:
         org_sent = org_sent.replace(tokenizer.mask_token, f"\\*{predicted}\\*", 1)
-
     return org_sent
 
 
-def sequence_results(seq_logits, target_words, mask_positions, input_ids ):
+def sequence_results(seq_logits, target_words, pos, input_ids ):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
     print('..Getting results..')
 
@@ -196,46 +249,42 @@ def sequence_results(seq_logits, target_words, mask_positions, input_ids ):
     #print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
 
     masked_sentence = tokenizer.decode(input_ids,  skip_special_tokens=False)
-    print("Masked sentence: ", masked_sentence)
-
     predicted_tokens = []
     mask_num = 0
-    print('Target words:', target_words)
+    predicted_token_id = None
+    target_token_id = None
+    unmasked_sentence = masked_sentence
 
-    # for each mask token in the sequence - get corresponding prediction and evaluate
-    for pos in mask_positions:
+    print(masked_sentence)
 
-        # Get target word
-        target_token_id = target_words[mask_num]
-        mask_num += 1 # increment for next pass
+    # Get target word
+    target_token_id = target_words[mask_num]
+    mask_num += 1 # increment for next pass
 
-        # Get raw prediction scores
-        token_logits = seq_logits[pos]
+    # Get raw prediction scores
+    token_logits = seq_logits[pos]
 
-        # Display top k predictions to the console
-        #display_predictions(token_logits, 2)
+    # Display top k predictions to the console
+    #display_predictions(token_logits, 2)
 
-        # Get top prediction
-        predicted_token_id = token_logits.argmax().item()
-        predicted_word = tokenizer.decode(predicted_token_id)
-        predicted_tokens.append(f"{predicted_word}")
+    # Get top prediction
+    predicted_token_id = token_logits.argmax().item()
+    predicted_word = tokenizer.decode(predicted_token_id)
+    predicted_tokens.append(f"{predicted_word}")
 
-        # Evaluate the accuracy of the top prediction
-        evaluate(predicted_token_id, target_token_id)
+    # Replace mask token with the top prediction
+    #input_ids[i, pos] = top_k_ids[0]
+    input_ids[pos] = predicted_token_id
 
-        # Replace mask token with the top prediction
-        #input_ids[i, pos] = top_k_ids[0]
-        input_ids[pos] = predicted_token_id
+    # Display new sentence with the predicted words highlighted
+    highlighted_result = print_highlighted_result(predicted_tokens, masked_sentence)
+    #print(highlighted_result)
 
-        # Display new sentence with the predicted words highlighted
-        highlighted_result = print_highlighted_result(predicted_tokens, masked_sentence)
-        print(highlighted_result)
+    # Decode repaired sentence from tokens
+    unmasked_sentence = tokenizer.decode(input_ids, skip_special_tokens=True)
+    #print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
 
-        # Decode repaired sentence from tokens
-        unmasked_sentence = tokenizer.decode(input_ids, skip_special_tokens=True)
-        print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
-
-    return []
+    return predicted_token_id, target_token_id, unmasked_sentence
 
 
 
@@ -251,8 +300,20 @@ def main():
     dataloader = TrainingData.get_training_data()
     #training(mlm_model, dataloader, device)
 
+    # Prepare testing data
+    # Get a dataset containing the masked version of all transcripts within the training data directory
+    test_dataset = MaskTranscript.mask_from_directory()
+    
+    # Batch this dataset to step through each data instance
+    loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=1,
+        shuffle=False
+    )
+    print("Dataset Loaded")
+
     # Run BERT on testing data
-    run_bert()
+    run_bert(loader)
 
     # Run model on random tokens in the dataset + calculate overall produced accuracy
     #accuracy_random_tokens(training_data, mlm_model, tokenizer, device)
@@ -261,8 +322,5 @@ def main():
     #paraphrase_text(result)
 
 
-
-
 if __name__ == '__main__':
     main()
-
