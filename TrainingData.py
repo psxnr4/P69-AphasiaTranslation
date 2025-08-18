@@ -95,7 +95,7 @@ def dataset_from_directory(dir_path):
 
 # Read in training data from the given path, tokenise and create dataset
 def dataset_from_file(file_path):
-    # Read test data as each line a seperate item in a list
+    # Read test data as each line a separate item in a list
     with open(file_path, 'r', encoding='utf-8') as f:
         train_data = [line.rstrip().rstrip('.') for line in f] # remove trailing periods
 
@@ -154,13 +154,9 @@ def add_context(text, min_size):
         final_line = ' '.join(line_w_context)
         text_w_context.append(final_line)
 
-        print('\n')
-        for l in text_w_context:
-            print(l)
+        #print('\n')
+        #for l in text_w_context:
+        #    print(l)
     return text_w_context
 
 
-
-
-
-get_training_data()
