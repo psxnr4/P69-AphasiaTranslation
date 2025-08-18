@@ -195,10 +195,8 @@ def mask_from_directory( ):
             # original sentence as a [string]
             all_orig_files.append(orig_file)
 
-            print("MASKED FILE: ", masked_file)
             # Introduce context to the utterances
             utterances = add_context(masked_file, 12) # param: array of strings # output: string
-            print(utterances)
             all_files_w_context.extend(utterances) # add utterances from this file to the array of all expanded-utterances seen so far
 
 
@@ -210,10 +208,6 @@ def mask_from_directory( ):
     # TODO: storing target words as tokenids rather than strings so there will be errors carried over
     print("Target words: ", all_target_words)
 
-    print("\n\nALL FILES: ", all_files_w_context)
-    print("FILES type:", type(all_files_w_context))
-    print("first element:", all_files_w_context[0] if all_files_w_context else None)
-
     # Create dataset
     dataset = write_to_dataset(all_files_w_context, all_target_words)
     return dataset
@@ -222,16 +216,16 @@ def mask_from_directory( ):
 # Add previous and trailing lines to each utterance to introduce context
 # text: array of strings
 def add_context(text, min_size):
+    # Remove empty lines
+    text = [l for l in text if l != "."]
 
     text_w_context = []
     for index in range(len(text)):
         line = text[index]
+        # Only add context to utterances with a mask token
         if not '[MASK]' in line:
             continue
-        print("\n")
-        print(line)
-        print("\n")
-
+        
         # Work with the lines as an array of words
         line_w_context = line.split()
         length = len(line_w_context)
@@ -244,27 +238,27 @@ def add_context(text, min_size):
                 prev_line = text[index - buffer].split()
             else:
                 prev_line = [] # reset to remove prev. value + append no additional info
-            #print("PRE at index: ", index - buffer, ": ", prev_line, "--len ", len(prev_line))
-            #print("line at index: ", index, ": ", text[index], "--len ", len(text[index].split()))
             if index + buffer < len(text):
                 next_line = text[index + buffer].split()
             else:
-                next_line = ['m']
-            #print("POST:at index: ", index + buffer, ": ", next_line, "--len ", len(next_line))
+                next_line = []
             buffer = buffer + 1
 
             # Concatenate the parts of the texts surrounding the masked line
-            line_w_context = prev_line + line_w_context + next_line
+            line_w_context = prev_line + ['[SEP]'] + line_w_context + ['[SEP]'] + next_line
             length = len(line_w_context)
-
-
-            #print("total length: ", len(prev_line) + len(text[index].split()) + len(next_line))
-        print(line_w_context, length)
-
+            
         # Join the combined lines into a single string and add to array
         final_line = ' '.join(line_w_context)
         text_w_context.append(final_line)
-    #print("TEXT WITH CONTEXT: ", text_w_context)
+
+    print("\nmasked utterances: ")
+    for l in text:
+        print(l)
+
+    print("\nmasked utterances with context: ")
+    for l in text_w_context:
+        print(l)
 
     return text_w_context
 
@@ -276,8 +270,8 @@ def tokenise_input(masked_sentences):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
     print('\n..Tokenising Input..')
 
-    print("masked_sentences type:", type(masked_sentences))
-    print("first element:", masked_sentences[0] if masked_sentences else None)
+    #print("masked_sentences type:", type(masked_sentences))
+    #print("first element:", masked_sentences[0] if masked_sentences else None)
 
     # Tokenise sentences and encode -- include padding as sentences are different lengths
     encoded_inputs = tokenizer(masked_sentences, return_tensors='pt', padding=True)
