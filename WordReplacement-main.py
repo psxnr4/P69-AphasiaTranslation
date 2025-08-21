@@ -24,10 +24,10 @@ import TrainingData # TextDataset #LoadDataset #get_training_data -- returns tra
 import TestingData # mask_from_directory -- masks training data stored in a given directory and returns dataset # Tokenise input
 
 # ---- SET UP
-minimum_context_length = False         # Word length of input utterance -- adds context from either side to reach length restriction
+minimum_context_length = 100         # Word length of input utterance -- adds context from either side to reach length restriction
 use_control_training_data = False    # Train the model on situational control data -- gives language context
 use_aphasia_training_data = False    # Train the model on aphasia data  -- gives structure context
-learning_rate = 5e-5                # Learning rate used during training
+learning_rate = 2e-5                # Learning rate used during training
 epochs = 3                          # Number of passes over full dataset during training
 
 # ------ MODELS
@@ -114,6 +114,10 @@ def run_bert(loader):
             # Get position of mask tokens in this sequence
             mask_indices = mask_positions[i].nonzero(as_tuple=True)[0]
             if len(mask_indices) == 0:
+                print("No mask token")
+                unmasked_sentence = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                print(input_ids[0])
+                print(unmasked_sentence)
                 continue  # no mask in this sentence
 
             # Get this sequence's attached information from the batch
@@ -248,7 +252,7 @@ def check_synonyms(predicted, target, sentence_tokens):
                 sim = s1.wup_similarity(s2)
                 if sim and sim > max_score:
                     print(s1, ",", s2, sim)
-                    max_score = sim
+                    max_score = round(sim,4)
         print("-- Max Synonyms Score: ", max_score)
         return round(max_score,4)
     else:
@@ -260,12 +264,18 @@ def check_synonyms(predicted, target, sentence_tokens):
 
 
 
+
 def print_highlighted_result(pred_tokens, org_sent):
     #print("Predicted tokens: ", pred_tokens)
     # Repair sentence with predictions - Replace each mask token one by one
     for predicted in pred_tokens:
         org_sent = org_sent.replace(tokenizer.mask_token, f"\\*{predicted}\\*", 1)
     return org_sent
+
+
+
+
+
 
 
 def main():
