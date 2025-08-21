@@ -6,6 +6,7 @@ import torch
 
 import TrainingData    #TextDataset
 
+
 # Initialize the tokenizer from the model
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
@@ -14,6 +15,8 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 main_dir = 'C:/Users/nat/OneDrive - The University of Nottingham/Documents/Dissertation/P69 - Aphasia Project/4. Analysis and Results/Test Data'
 raw_gem_dir = main_dir + '/Raw Transcript'
 flo_gem_dir = main_dir + '/Flo Output'
+repaired_gem_dir = main_dir + '/Repaired Flo'
+
 
 
 # Get gem output from file -- saved under name.umbrella.gem.cex in main raw_gem_dir
@@ -38,6 +41,20 @@ def get_gem(filename):
 def get_flo(filename):
     name, ext = os.path.splitext(filename)  # ('--.umbrella.gem' , '.cex')
     flo_gem_path = os.path.join(flo_gem_dir, name + '.flo.cex')
+
+    # read in the cleaned transcript - this has no error coding and will be the input to our models
+    with open(flo_gem_path, 'r', encoding='utf-8', errors="replace") as f:
+        flo_gem_content = f.read()
+    # Split each line
+    flo_gem = flo_gem_content.split('\n')
+    # remove repeated words
+    flo_gem = remove_repetition(flo_gem)
+    return flo_gem
+
+
+def get_repaired_flo(filename):
+    name, ext = os.path.splitext(filename)  # ('--.umbrella.gem' , '.cex')
+    flo_gem_path = os.path.join(repaired_gem_dir, name + '.flo.cex')
 
     # read in the cleaned transcript - this has no error coding and will be the input to our models
     with open(flo_gem_path, 'r', encoding='utf-8', errors="replace") as f:
@@ -110,7 +127,7 @@ def find_error_position(orig_words, flo_words ):
     # Step through Sequence Matcher analysis
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         # Display analysis nicely
-        #print('{:7}   a[{}:{}] --> b[{}:{}] {!r:>8} --> {!r}'.format(tag, i1, i2, j1, j2, orig_tokens[i1:i2], flo_tokens[j1:j2]))
+        #print('{:7}   a[{}:{}] --> b[{}:{}] {!r:>8} --> {!r}'.format(tag, i1, i2, j1, j2, orig_words[i1:i2], flo_words[j1:j2]))
         '''
         Example output:
         equal a[0:9] --> b[0:9]['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat'] --> ['the', 'mother', 'and', 'child', 'are', 'arguing', 'over', 'the', 'raincoat']
@@ -151,7 +168,6 @@ def mask_word(line_errors, line):
 
     # Keep track of an offset to keep the error positions aligned after adding in multiple mask tokens
     offset = 0
-
     # For each error in this line
     for pair in line_errors:
         error_position = pair[0]
@@ -161,7 +177,7 @@ def mask_word(line_errors, line):
 
         # Tokenise the word
         word_tokens = tokenizer.tokenize(repair_word)
-        print("Repair word tokens:", word_tokens)
+        print("Repair word tokens:", word_tokens, tokenizer.convert_tokens_to_ids(repair_word))
         num = len(word_tokens)
         # Replace the erroneous word with the same number of mask token-strings '[MASK]'
         masked_line = (
@@ -216,19 +232,23 @@ def tokenise_line(masked_line, repaired_line):
                                return_tensors='pt',
                                padding='max_length',
                                truncation=True,
-                               max_length=32
+                               max_length=512
                             )
     #print("encoded_inputs type:", type(encoded_inputs))
     #print(encoded_inputs)
 
+    #print(repaired_line)
+
     # Similarly tokenise the repaired line to ensure there is alignment with the encodings
+
     repaired_inputs = tokenizer(repaired_line,
                                is_split_into_words=True,
                                return_tensors='pt',
                                padding='max_length',
                                truncation=True,
-                               max_length=32
+                               max_length=512
                             )
+
 
     input_ids = encoded_inputs["input_ids"].squeeze(0)  # (seq_len,)
     repaired_ids = repaired_inputs["input_ids"].squeeze(0)
@@ -249,6 +269,49 @@ def tokenise_line(masked_line, repaired_line):
 
 
 
+# Add previous and trailing lines to each utterance to introduce context
+# Build an adaptive context window around the masked line of at least min number of words
+# text: array of strings
+def add_context_to_line(repaired_line, masked_line, text, index, min_size):
+    print("\n..Adding Context..")
+
+    # Work with the lines as an array of words
+    line_w_context = masked_line
+    length = len(line_w_context)
+    #print("line: ", line_w_context, length)
+
+    # Counter to ensure context is added from both sides until the length limit is reached
+    buffer = 1
+    while length < min_size:
+        # Check that we are not going past the boundaries of the text if so reset to remove prev. value + append no additional info
+        # Get the lines before and after this line in the text
+        prev_line = text[index - buffer].split() if index - buffer >= 0 else []
+        next_line = text[index + buffer].split() if index + buffer < len(text) else []
+        buffer = buffer + 1
+        #print("PREV: ", prev_line)
+        #print(line_w_context)
+        #print("NEXT: ", next_line)
+
+        # Concatenate the parts of the texts surrounding the masked line
+        line_w_context = prev_line + ['[SEP]'] + line_w_context + ['[SEP]'] + next_line
+        length = len(line_w_context)
+        #print(line_w_context)
+
+        offset = len(tokenizer.tokenize(" ".join(prev_line)))
+        # Pad labelled line to keep alignment
+        repaired_line = prev_line + ['[SEP]'] + repaired_line
+
+
+    print("\noriginal line: ")
+    print(masked_line)
+
+    print("\nline with context: ")
+    print(line_w_context)
+
+    return line_w_context, repaired_line
+
+
+
 # Helper function to combine list of line encodings into a single dictionary
 def collate_encodings(encoded_list):
     # Create a new dictionary to hold all encodings
@@ -258,15 +321,12 @@ def collate_encodings(encoded_list):
     return combined
 
 
+
 def mask_from_directory(minimum_context_length):
     print("Retrieving files from directory..")
     # Store data across all files
-    all_masked_files = []
-    all_target_words = []
-    all_orig_files = []
-    all_masked_utts = []
-    all_files_w_context = []
 
+    all_target_words = []
     encoded_masked_lines = [] # list of dictionaries of tensors
 
     # Get all .cex files in the directory
@@ -280,6 +340,7 @@ def mask_from_directory(minimum_context_length):
             # Use filename in directory to navigate the needed transcript parts
             raw_gem = get_gem(filename)
             flo_gem = get_flo(filename)
+            repaired_gem = get_repaired_flo(filename)
 
             # Analyse each line separately
             for index in range(len(raw_gem)):
@@ -295,31 +356,18 @@ def mask_from_directory(minimum_context_length):
                 # Process line to get position of the error and mask its corresponding token in the cleaned transcript
                 masked_line, repaired_line = process_line(raw_gem[index], flo_gem[index])
 
+                line_with_context, repaired_line = add_context_to_line(repaired_line, masked_line, repaired_gem, index, minimum_context_length)
+
                 # Tokenise the line and create a copy labelling the suggested target word that will be used to evaluate error prediction
-                encoded_line = tokenise_line(masked_line, repaired_line) # returns a dictionary of tensors
+                encoded_line = tokenise_line(line_with_context, repaired_line) # returns a dictionary of tensors
                 #print("encoded_line: ", encoded_line)
 
                 # Add to list of encodings
                 encoded_masked_lines.append(encoded_line)
 
-                # -- END OF LINE
+                ##print( encoded_line )
+                #print( tokenizer.decode(encoded_line['input_ids'][0], skip_special_tokens=False))
 
-                #full_masked_file = full_masked_file + final_line + ' '
-                # Store all utterances across all files
-                #all_masked_utts.append(final_line)
-
-            # -- END OF FILE
-            # Update data var across all files
-            #all_masked_files.append(full_masked_file)
-            #all_orig_files.append(orig_file)
-
-
-            #print("MASKED FILE: ", full_masked_file)
-
-            #if minimum_context_length:
-            #    # Introduce context to the utterances
-            #    utterances = add_context_to_text(full_masked_file, minimum_context_length)  # param: array of strings # output: string
-            #    all_files_w_context.extend(utterances)  # add utterances from this file to the array of all expanded-utterances seen so far
 
     # -- END OF ALL FILES
     print("\n-- Files masked. --")
@@ -327,7 +375,7 @@ def mask_from_directory(minimum_context_length):
     # Combine all line encodings to create a single encoding of all masked lines in the directory files
     all_encodings = collate_encodings(encoded_masked_lines)
 
-    print(".. writing to dataset ..")
+    print(".. Writing to dataset ..")
     # Create a dataset of the token encodings and link the masked strings
     dataset = TrainingData.TextDataset(all_encodings, all_target_words)
 
@@ -335,92 +383,7 @@ def mask_from_directory(minimum_context_length):
     print(f"input_ids length: {len(all_encodings['input_ids'])}")
     print(f"labels length: {len(all_encodings['labels'])}")
 
-
-    '''
-    if minimum_context_length:
-        print("using context")
-        # use only masked utterances with additional context where needed
-        #dataset = write_to_dataset(all_files_w_context, all_target_words)
-    else:
-        print("without context")
-        # use full files
-        dataset = write_to_dataset(all_masked_files, all_target_words)
-    '''
     return dataset
 
-
-
-
-# Add previous and trailing lines to each utterance to introduce context
-# Build an adaptive context window around the masked line of at least min number of words
-# text: array of strings
-def add_context_to_text(text, min_size):
-    print("\n..Adding Context..")
-    # Remove empty lines
-    text = text.split('.')
-    #text = [l for l in text if l != "."]
-    text_w_context = []
-    print(text)
-
-    for index in range(len(text)):
-        line = text[index]
-        # Only add context to utterances with a mask token
-        if not '[MASK]' in line:
-            continue
-
-        # Work with the lines as an array of words
-        line_w_context = line.split()
-        length = len(line_w_context)
-        print("line: ", line_w_context, length)
-
-        # Counter to ensure context is added from both sides until the length limit is reached
-        buffer = 1
-        while length < min_size:
-            # Check that we are not going past the boundaries of the text if so reset to remove prev. value + append no additional info
-            # Get the lines before and after this line in the text
-            prev_line = text[index - buffer].split() if index - buffer >= 0 else []
-            next_line = text[index + buffer].split() if index + buffer < len(text) else []
-            buffer = buffer + 1
-            print("PREV: ", prev_line)
-            print(line)
-            print("NEXT: ", next_line)
-
-            # Concatenate the parts of the texts surrounding the masked line
-            line_w_context = prev_line + ['[SEP]'] + line_w_context + ['[SEP]'] + next_line
-            length = len(line_w_context)
-            print(line_w_context)
-
-        # Join the combined lines into a single string and add to array
-        final_line = ' '.join(line_w_context)
-        text_w_context.append(final_line)
-
-    print("\nmasked utterances: ")
-    print(text)
-
-    print("\nmasked utterances with context: ")
-    print(text_w_context)
-
-    return text_w_context
-
-
-
-def write_to_dataset(all_files, all_target_words):
-    print('\n..Writing to dataset..')
-    print(type(all_files), len(all_files))
-    print(all_files[:5])
-
-    print("Target words: ", all_target_words)
-
-    # Tokenise inputs
-    input_encodings = tokenise_input(all_files, all_target_words)
-
-    # Create a dataset of the token encodings and link the masked strings
-    dataset = TrainingData.TextDataset(input_encodings, all_target_words)
-
-    print(f" -- Created Dataset size: {len(dataset)}")
-    print(f"input_ids length: {len(input_encodings['input_ids'])}")
-    print(f"target_ids length: {len(all_target_words)}")
-
-    return dataset
 
 
