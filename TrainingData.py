@@ -7,6 +7,9 @@ import os
 import string
 from sklearn.model_selection import train_test_split
 
+batch_size = 32
+
+
 # Initialize the tokenizer from the model
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 # Get BERT masked language model from Hugging Face
@@ -21,19 +24,12 @@ aphasia_directory = directory_root + '/Aphasia Training Data/Repaired-Flo'
 class TextDataset(torch.utils.data.Dataset):
     def __init__(self, encodings, target_ids=None):
         self.encodings = encodings
-        self.target_ids = target_ids # list of strings
 
     def __len__(self):
         return len(self.encodings['input_ids'])
 
     def __getitem__(self, idx):
         item = {key: val[idx] for key, val in self.encodings.items()}
-
-        if self.target_ids is not None:
-            if idx < len(self.target_ids):
-                item['target_ids'] = torch.tensor(self.target_ids[idx])
-            else:
-                raise IndexError(f"Index {idx} out of range for target_ids of length {len(self.target_ids)}")
         return item
 
 
@@ -70,18 +66,23 @@ def dataset_from_directory(dir_path, minimum_context_length):
             file_path = os.path.join(dir_path, filename)
             with open(file_path, 'r', encoding='utf-8') as f:
                data = f.read()
+
             # Separate each utterance to be processed individually
             data = data.split('\n')
-            # Add context to each utterance
-            data_w_context = add_context(data, minimum_context_length)
-            all_data.extend(data_w_context)
+            if minimum_context_length:
+                # Add context to each utterance
+                data_w_context = add_context(data, minimum_context_length) # returns list of strings
+                all_data.extend(data_w_context) # add elements to array
+            else:
+                data = ' '.join(data)
+                all_data.append(data) # add string to end of array
 
     print(type(all_data), len(all_data))
     print(all_data[:5])
 
     # -- Tokenise data
     inputs = tokenizer(
-        all_data, max_length=512, truncation=True, padding=True, return_tensors=None
+        all_data, max_length=64, truncation=True, padding=True, return_tensors=None
     )  # keys: input_ids, token_type_ids, attention_mask
 
     # Create dataset to define how to load and batch the tokenized data
@@ -125,7 +126,7 @@ def load_dataset(dataset):
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=16,
+        batch_size=batch_size,
         shuffle=True,
         collate_fn=data_collator
     )
