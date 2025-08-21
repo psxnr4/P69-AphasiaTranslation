@@ -6,12 +6,8 @@
 # AdamW optimiser is then placed on the model + we run training on the control data in batches
 # The testing stage is then repeated on the same data to predict new random tokens.
 # - this is able to use the context of all control data
-# Displays only the predictions that do not match the original token - some of these may be accepted if they give the same meaning
 
-# -- Training on the combined dataset on control and repaired aphasia transcripts
-# -- On W01 this gives accuracy of Accuracy: 71.43% on 7 sequences using learning rate 5e-05
-
-
+# If a sentence has multiple mask tokens they will be predicted in sequence, this may propagate some errors
 
 import torch
 from tqdm.auto import tqdm
@@ -23,22 +19,21 @@ import string
 import nltk
 from nltk.corpus import wordnet # Detect synonyms https://www.geeksforgeeks.org/python/get-synonymsantonyms-nltk-wordnet-python/
 
-from typing_extensions import override
-
 # Python modules
 import TrainingData # TextDataset #LoadDataset #get_training_data -- returns training datasets
-import MaskTranscript # mask_from_directory -- masks training data stored in a given directory and returns dataset
-                        # Tokenise input
+import TestingData # mask_from_directory -- masks training data stored in a given directory and returns dataset # Tokenise input
 
 # ---- SET UP
-minimum_context_length = 12         # word length of input utterance -- adds context from either side to reach length restriction
-use_control_training_data = False    # train the model on situational control data
-use_aphasia_training_data = False    # train the model on aphasia data
-
+minimum_context_length = False         # Word length of input utterance -- adds context from either side to reach length restriction
+use_control_training_data = False    # Train the model on situational control data -- gives language context
+use_aphasia_training_data = False    # Train the model on aphasia data  -- gives structure context
+learning_rate = 5e-5                # Learning rate used during training
+epochs = 3                          # Number of passes over full dataset during training
 
 # ------ MODELS
 set_seed(42)
 warnings.filterwarnings("ignore")
+
 
 # Initialize the tokenizer from the model
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -54,8 +49,8 @@ bart_tokenizer = BartTokenizer.from_pretrained('eugenesiow/bart-paraphrase')
 
 def training(model, dataloader, device):
     # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
-    epochs = 3  # Number of passes over full dataset
-    optimizer = AdamW(model.parameters(), lr=5e-5)
+    #epochs = 3  # Number of passes over full dataset
+    optimizer = AdamW(model.parameters(), lr=learning_rate)
     model.train()  # Puts the model in training mode
 
     for epoch in range(epochs):
@@ -82,13 +77,13 @@ def training(model, dataloader, device):
 
 
 def run_bert(loader):
+    print("\n -------------------------------------\n Running BERT \n \n -------------------------------------")
 
     # Keep track of module performance on each batch of data
     correct_count = 0
     total_count = 0
     accuracy = 0
-    valid = False
-
+    # Counter
     n = 0
     for batch in loader:
         print(f" \n***** utterance batch {n}  ***** \n -------------------------------------")
@@ -96,53 +91,64 @@ def run_bert(loader):
         # Get batch information
         input_ids = batch['input_ids']
         attention_mask = batch['attention_mask']
-        encoded_inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+        batch_labels = batch['labels']
 
-        # Get attached information
-        target_ids_list = []
-        for i, target in enumerate(batch['target_ids']):
-            target_ids_list = target.tolist()
-
-        # Get positions of each mask token
-        pos_masks = [torch.where(seq ==  tokenizer.mask_token_id)[0].tolist() for seq in input_ids]  # 2d array -- list of indexes for mask tokens in each sentence
+        # Find positions of masks in each sentence
+        mask_positions = (input_ids == tokenizer.mask_token_id)  # bool tensor (batch_size, seq_length)
 
         # If no mask tokens have been found there's no need to run the model
-        if pos_masks == [[]]:
+        if mask_positions == [[]]:
             print("-- No mask tokens found --")
-            unmasked_sentence = tokenizer.decode(encoded_inputs["input_ids"][0], skip_special_tokens=True)
-            print(encoded_inputs["input_ids"][0])
+            unmasked_sentence = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+            print(input_ids[0])
             print(unmasked_sentence)
             continue
 
-        # Pass batch into mlm model
-        outputs = mlm_model(**encoded_inputs)
-        logits = outputs.logits
-        sequence_length = outputs.logits.shape[1]  # -- (batch_size, sequence_length, vocab_size)
+        # Forward pass BERT on batch
+        with torch.no_grad():
+            outputs = mlm_model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits  # (batch_size, seq_length, vocab_size)
 
-        # For each sentence i in the batch
-        for i, mask_positions in enumerate(pos_masks):
-            print("mask_positions", mask_positions)
-            # logits for this sequence
-            seq_logits = logits[i]  # shape: (seq_length, vocab_size)
+        # For each sequence item in the batch
+        for i in range(input_ids.size(0)):
+            # Get position of mask tokens in this sequence
+            mask_indices = mask_positions[i].nonzero(as_tuple=True)[0]
+            if len(mask_indices) == 0:
+                continue  # no mask in this sentence
 
-            # Get sequence of token IDs from the batch
-            input_ids = encoded_inputs['input_ids'][i]
+            # Get this sequence's attached information from the batch
+            seq_labels = batch_labels[i] if batch_labels is not None else None  # suggested repair words for evaluation
+            seq_token_ids = input_ids[i].clone()                                    # copy of seq tokens to modify
+            seq_logits = logits[i]                                                  # output from the mlm
 
-            # for each mask token in the sequence - get corresponding prediction and evaluate
-            count = 0
-            for pos in mask_positions:
-                print(f"\n ***** mask num {count}  ***** ")
-                count +=1
-                predicted_token_id, target_token_id, unmasked_sentence = sequence_results(seq_logits, target_ids_list, pos, input_ids)
-                # Evaluate the accuracy of the top prediction - if prediction has been made
-                if predicted_token_id and target_token_id:
-                    valid = evaluate_prediction(predicted_token_id, target_token_id, unmasked_sentence)
-                else:
-                    continue
+            #print(seq_labels)
+            #print(seq_input_ids)
+            #print(seq_logits)
 
-                if valid:
-                    correct_count += 1
-                total_count += 1
+            # For each mask token in the sequence
+            for index in mask_indices:
+                # Display masked utterance
+                masked_utt = tokenizer.decode(seq_token_ids, skip_special_tokens=False)
+                print(masked_utt)
+                display_predictions(seq_logits[index], 2)
+
+                # Get corresponding prediction from the batch output
+                predicted_token_id = seq_logits[index].argmax().item()
+                # Insert prediction into the list of input tokens
+                seq_token_ids[index] = predicted_token_id
+
+                # Evaluate prediction if labels are available
+                if seq_labels is not None:
+                    # Get corresponding token in the label tensor
+                    target_token_id = seq_labels[index].item()
+                    if predicted_token_id and target_token_id:
+                        if evaluate_prediction(predicted_token_id, target_token_id, seq_token_ids ):
+                            correct_count += 1
+                    total_count += 1
+
+            # Decode predicted sentence
+            completed_sentence = tokenizer.decode(seq_token_ids, skip_special_tokens=True)
+            print(f"Completed sentence: {completed_sentence}")
 
     if total_count > 0:
         accuracy = correct_count / total_count
@@ -150,7 +156,9 @@ def run_bert(loader):
         print(f"Accuracy: {accuracy * 100:.2f}% on {total_count} sequences")
         print(f"------------------------------ \n ------------------------------")
 
+
     return accuracy
+
 
 
 def display_predictions(logits, top_k ):
@@ -169,14 +177,14 @@ def display_predictions(logits, top_k ):
 
 
 
-def evaluate_prediction(predicted_token_id, target_token_id, unmasked_sentence):
+def evaluate_prediction(predicted_token_id, target_token_id, sentence_tokens):
     # get token as a string
     predicted_word = tokenizer.decode(predicted_token_id)
     target_word = tokenizer.decode(target_token_id)
 
     # Display top prediction
     #print("Suggested target word is : ", target_word, " : ", target_token_id)
-    print("predicted: ", predicted_word, "| original: ", target_word)
+    print("predicted: ", predicted_word, "| suggested: ", target_word)
     #print("predicted: ", predicted_token_id, "| original: ", target_token_id)
 
     # Accept an exact match
@@ -185,55 +193,70 @@ def evaluate_prediction(predicted_token_id, target_token_id, unmasked_sentence):
         return True
 
     # If not an exact match, check if prediction is a synonym of target
-    score = check_synonyms(predicted_word, target_word, unmasked_sentence)
+    score = check_synonyms(predicted_word, target_word, sentence_tokens)
+    print("Synonym score: ", score)
     if score > 0.75:
-        print("Synonym of score: ", score)
+        print("Synonym match!")
         return True
     else:
         print("!!! No match ")
         return False
 
 
-def check_synonyms(predicted, target, sentence):
+def check_synonyms(predicted, target, sentence_tokens):
     # adapted from https://www.geeksforgeeks.org/python/get-synonymsantonyms-nltk-wordnet-python/
 
-    # get position in sentence  - remove punctuation as this hides the word
-    cleaned_text = sentence.translate(str.maketrans('', '', string.punctuation))
-    words = cleaned_text.split()
-    #print("sentence: ", words)
-    # If prediction is not in the sentence then exit error
-    if predicted not in words:
-        return False
-    pos = words.index(predicted)
+    # Get the sentence we have so far from the tokens
+    sentence = tokenizer.decode(sentence_tokens, skip_special_tokens=True)
+    # Get the predicted word's position in the sentence  - remove punctuation as this hides the word
+    sentence = sentence.translate(str.maketrans('', '', string.punctuation))
+    pred_sent = sentence.split()
 
-    # Use the completed sentence to extract 'part-of-speech' tag to evaluate the selected words within the given context
-    tagged = nltk.pos_tag(words)
-    tagged_predicted = tagged[pos]
+    # If prediction is not in the sentence then exit with error
+    if predicted not in pred_sent:
+        print("*ERR:* cant find predicted word")
+        return False
+    index = pred_sent.index(predicted)
+
+    # Create a copy of the sentence to contain the suggested target word
+    targ_sent = sentence.split()
+    targ_sent[index] = target
+    print("Target sentence: ", targ_sent)
+
+    # Get the words within the context of the surrounding sentence
+    # Tag all words with its 'part-of-speech' and extract the needed index
+    pred_tagged = nltk.pos_tag(pred_sent)[index]
+    targ_tagged = nltk.pos_tag(targ_sent)[index]
 
     # Get POS type from nlkt tag -- https://www.nltk.org/book/ch05.html
     #print(nltk.pos_tag([target]))
-    if tagged_predicted[1] in ["PRP", "PRP$", "WP", "WP$"]:
+    if pred_tagged[1] in ["PRP", "PRP$", "WP", "WP$"] or targ_tagged[1] in ["PRP", "PRP$", "WP", "WP$"]:
         print("Word is a pronoun - cannot check synonyms")
         return False
 
-    # Convert to a synsets object by getting the first item from the list of word definitions
-    # take None if the word is not found in wordnet - e.g. wordnet does not include pronouns
-    syns_word1 = wordnet.synsets(predicted)[0] if wordnet.synsets(predicted) else None
-    syns_word2 = wordnet.synsets(target)[0] if wordnet.synsets(target) else None
-
-    print("-- Checking synonyms between ", syns_word1, " and ", syns_word2)
+    # Convert to a synsets object take None if the word is not found in wordnet - e.g. wordnet does not include pronouns
+    print("-- Checking synonyms between ", pred_tagged, " and ", targ_tagged)
+    syns_pred = wordnet.synsets(predicted)
+    syns_targ = wordnet.synsets(target)
 
     # If both words have been found then calculate similarity
-    if syns_word1 and syns_word2:
-        syns_score = syns_word1.wup_similarity(syns_word2)
-        print("-- Synonyms score: ", syns_score)
-        return syns_score
+    if syns_pred and syns_targ:
+        # Compare all combinations of definitions of the word found
+        max_score = 0
+        for s1 in syns_pred:
+            for s2 in syns_targ:
+                sim = s1.wup_similarity(s2)
+                if sim and sim > max_score:
+                    print(s1, ",", s2, sim)
+                    max_score = sim
+        print("-- Max Synonyms Score: ", max_score)
+        return round(max_score,4)
     else:
         print("-- Word has not been found in wordnet")
         return False
 
 # todo: could also test to see if target is in syn set of predicted word
-
+# todo: check to see if target word is in the top 10 predicted words - then accuracy is a little off but not too low
 
 
 
@@ -243,57 +266,6 @@ def print_highlighted_result(pred_tokens, org_sent):
     for predicted in pred_tokens:
         org_sent = org_sent.replace(tokenizer.mask_token, f"\\*{predicted}\\*", 1)
     return org_sent
-
-
-def sequence_results(seq_logits, target_words, pos, input_ids ):
-    # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
-    print('..Getting results..')
-
-    # Display sentence and tokens
-    #print('\n---- Sentence ', i + 1)
-    #print('Original:', masked_sentences[i])
-    #print('Tokenized:', tokenizer.tokenize(masked_sentences[i]))
-    #print('Token IDs:', tokenizer.convert_tokens_to_ids(tokenizer.tokenize(masked_sentences[i])))
-
-    masked_sentence = tokenizer.decode(input_ids,  skip_special_tokens=False)
-    predicted_tokens = []
-    mask_num = 0
-    predicted_token_id = None
-    target_token_id = None
-    unmasked_sentence = masked_sentence
-
-    print(masked_sentence)
-
-    # Get target word
-    target_token_id = target_words[mask_num]
-    mask_num += 1 # increment for next pass
-
-    # Get raw prediction scores
-    token_logits = seq_logits[pos]
-
-    # Display top k predictions to the console
-    #display_predictions(token_logits, 2)
-
-    # Get top prediction
-    predicted_token_id = token_logits.argmax().item()
-    predicted_word = tokenizer.decode(predicted_token_id)
-    predicted_tokens.append(f"{predicted_word}")
-
-    # Replace mask token with the top prediction
-    #input_ids[i, pos] = top_k_ids[0]
-    input_ids[pos] = predicted_token_id
-
-    # Display new sentence with the predicted words highlighted
-    highlighted_result = print_highlighted_result(predicted_tokens, masked_sentence)
-    #print(highlighted_result)
-
-    # Decode repaired sentence from tokens
-    unmasked_sentence = tokenizer.decode(input_ids, skip_special_tokens=True)
-    #print(f"\nUnmasked sentence with top predictions:\n{unmasked_sentence}\n")
-
-    return predicted_token_id, target_token_id, unmasked_sentence
-
-
 
 
 def main():
@@ -310,7 +282,7 @@ def main():
 
     # Prepare testing data
     # Get a dataset containing the masked version of all transcripts within the training data directory
-    test_dataset = MaskTranscript.mask_from_directory(minimum_context_length)
+    test_dataset = TestingData.mask_from_directory(minimum_context_length)
     
     # Batch this dataset to step through each data instance
     loader = torch.utils.data.DataLoader(
@@ -328,6 +300,8 @@ def main():
 
     # Paraphrase output
     #paraphrase_text(result)
+
+
 
 
 if __name__ == '__main__':
