@@ -232,7 +232,7 @@ def tokenise_line(masked_line, repaired_line):
                                return_tensors='pt',
                                padding='max_length',
                                truncation=True,
-                               max_length=512
+                               max_length=128
                             )
     #print("encoded_inputs type:", type(encoded_inputs))
     #print(encoded_inputs)
@@ -246,7 +246,7 @@ def tokenise_line(masked_line, repaired_line):
                                return_tensors='pt',
                                padding='max_length',
                                truncation=True,
-                               max_length=512
+                               max_length=128
                             )
 
 
@@ -285,28 +285,34 @@ def add_context_to_line(repaired_line, masked_line, text, index, min_size):
     while length < min_size:
         # Check that we are not going past the boundaries of the text if so reset to remove prev. value + append no additional info
         # Get the lines before and after this line in the text
-        prev_line = text[index - buffer].split() if index - buffer >= 0 else []
-        next_line = text[index + buffer].split() if index + buffer < len(text) else []
+        prev_line = text[index - buffer].split() + ['[SEP]'] if index - buffer >= 0 else []
+        next_line = ['[SEP]'] + text[index + buffer].split() if index + buffer < len(text) else []
         buffer = buffer + 1
         #print("PREV: ", prev_line)
         #print(line_w_context)
         #print("NEXT: ", next_line)
 
         # Concatenate the parts of the texts surrounding the masked line
-        line_w_context = prev_line + ['[SEP]'] + line_w_context + ['[SEP]'] + next_line
+        line_w_context = prev_line + line_w_context + next_line
         length = len(line_w_context)
         #print(line_w_context)
 
         offset = len(tokenizer.tokenize(" ".join(prev_line)))
         # Pad labelled line to keep alignment
-        repaired_line = prev_line + ['[SEP]'] + repaired_line
+        repaired_line = prev_line + repaired_line
 
+        if prev_line == [] and next_line == []:
+            # Entire text has been added so break even if length has not been met
+            break
 
     print("\noriginal line: ")
     print(masked_line)
 
     print("\nline with context: ")
     print(line_w_context)
+
+    print("\n padded repair line: ")
+    print(repaired_line)
 
     return line_w_context, repaired_line
 
@@ -322,7 +328,7 @@ def collate_encodings(encoded_list):
 
 
 
-def mask_from_directory(minimum_context_length):
+def mask_from_directory(max_context_length):
     print("Retrieving files from directory..")
     # Store data across all files
 
@@ -356,7 +362,7 @@ def mask_from_directory(minimum_context_length):
                 # Process line to get position of the error and mask its corresponding token in the cleaned transcript
                 masked_line, repaired_line = process_line(raw_gem[index], flo_gem[index])
 
-                line_with_context, repaired_line = add_context_to_line(repaired_line, masked_line, repaired_gem, index, minimum_context_length)
+                line_with_context, repaired_line = add_context_to_line(repaired_line, masked_line, repaired_gem, index, max_context_length)
 
                 # Tokenise the line and create a copy labelling the suggested target word that will be used to evaluate error prediction
                 encoded_line = tokenise_line(line_with_context, repaired_line) # returns a dictionary of tensors
@@ -365,7 +371,7 @@ def mask_from_directory(minimum_context_length):
                 # Add to list of encodings
                 encoded_masked_lines.append(encoded_line)
 
-                ##print( encoded_line )
+                print( encoded_line )
                 #print( tokenizer.decode(encoded_line['input_ids'][0], skip_special_tokens=False))
 
 
