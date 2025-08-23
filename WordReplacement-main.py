@@ -11,24 +11,33 @@
 
 import torch
 from tqdm.auto import tqdm
-from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed  #BERT mlm
+from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed, get_linear_schedule_with_warmup  #BERT mlm
 from transformers import BartForConditionalGeneration, BartTokenizer      #BART paraphrase
 
 import warnings
 import string
+import csv
 import nltk
 from nltk.corpus import wordnet # Detect synonyms https://www.geeksforgeeks.org/python/get-synonymsantonyms-nltk-wordnet-python/
 
 # Python modules
 import TrainingData # TextDataset #LoadDataset #get_training_data -- returns training datasets
 import TestingData # mask_from_directory -- masks training data stored in a given directory and returns dataset # Tokenise input
+import LogResults   # create_result_files
 
 # ---- SET UP
-minimum_context_length = 100         # Word length of input utterance -- adds context from either side to reach length restriction
-use_control_training_data = False    # Train the model on situational control data -- gives language context
+max_context_length = 5      # Word length of input utterance -- adds context from either side to reach length restriction
+use_control_training_data = True    # Train the model on situational control data -- gives language context
 use_aphasia_training_data = False    # Train the model on aphasia data  -- gives structure context
 learning_rate = 2e-5                # Learning rate used during training
 epochs = 3                          # Number of passes over full dataset during training
+batch_size = 16                    # Batch size used on training data
+
+# ------ VARS
+epoch_losses = [0,0,0] # loss after each epoch
+batch_eval = {'correct_count':0, 'total_count':0, 'exact_match':0, 'syn_match':0} # Keep track of module performance on each batch of data
+set_up_vars = [max_context_length, use_control_training_data, use_aphasia_training_data, learning_rate, batch_size]
+
 
 # ------ MODELS
 set_seed(42)
@@ -47,43 +56,70 @@ bart_tokenizer = BartTokenizer.from_pretrained('eugenesiow/bart-paraphrase')
 
 
 
+# Training the model on passed data
 def training(model, dataloader, device):
     # adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
-    #epochs = 3  # Number of passes over full dataset
     optimizer = AdamW(model.parameters(), lr=learning_rate)
+
+    total_steps = len(dataloader) * epochs
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=int(0.1 * total_steps),  # 10% warmup
+        num_training_steps=total_steps
+    )
+
+
     model.train()  # Puts the model in training mode
 
+    #print("sample:")
+    #print()
+
     for epoch in range(epochs):
-        loop = tqdm(dataloader)  # We use this to display a progress bar
+        loop = tqdm(dataloader)
 
         for batch in loop:
-            optimizer.zero_grad()  # Reset gradients before each batch
+            # Reset gradients before each batch
+            optimizer.zero_grad()
             # Move input_ids, labels, attention_mask to be on the same device as the model
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
             attention_mask = batch['attention_mask'].to(device)
 
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)  # Forward pass
+            #print("---- training batch -----")
+            #masked_count = (batch["labels"] != -100).sum().item()
+            #total_count = batch["labels"].numel()
+            #print(f"Masked tokens: {masked_count}/{total_count}")
+
+            # Forward pass
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
+            #print("loss: ", outputs.loss.item())
 
-            loss.backward()  # Compute gradients, backward pass
-            optimizer.step()  # Update model parameters
+            # Compute gradients, backward pass
+            loss.backward()
 
-            loop.set_description("Epoch: {}".format(epoch))  # Display epoch number
-            loop.set_postfix(loss=loss.item())  # Show loss in the progress bar
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            # Update model parameters
+            optimizer.step()
+            scheduler.step()
+
+            # Display progress bar with epoch number and loss
+            loop.set_description("Epoch: {}".format(epoch))
+            loop.set_postfix(loss=loss.item())
+
+            epoch_losses[epoch] = loss.item()
 
 
 
 
-
-def run_bert(loader):
+def run_bert(loader, run_writer):
     print("\n -------------------------------------\n Running BERT \n \n -------------------------------------")
 
-    # Keep track of module performance on each batch of data
-    correct_count = 0
-    total_count = 0
-    accuracy = 0
-    # Counter
+    # Keep track of module performance on each batch of data - rest values
+    batch_eval.update({'correct_count':0, 'total_count':0, 'exact_match':0, 'syn_match':0})
+
     n = 0
     for batch in loader:
         print(f" \n***** utterance batch {n}  ***** \n -------------------------------------")
@@ -146,22 +182,32 @@ def run_bert(loader):
                     # Get corresponding token in the label tensor
                     target_token_id = seq_labels[index].item()
                     if predicted_token_id and target_token_id:
-                        if evaluate_prediction(predicted_token_id, target_token_id, seq_token_ids ):
-                            correct_count += 1
-                    total_count += 1
+                        results = evaluate_prediction(predicted_token_id, target_token_id, seq_token_ids )
+                        # Write prediction to log
+                        print(results)
+                        run_writer.writerow(results)
+                    batch_eval['total_count'] += 1
 
             # Decode predicted sentence
             completed_sentence = tokenizer.decode(seq_token_ids, skip_special_tokens=True)
             print(f"Completed sentence: {completed_sentence}")
 
-    if total_count > 0:
-        accuracy = correct_count / total_count
+    if batch_eval['total_count'] > 0:
+        accuracy = batch_eval['correct_count'] / batch_eval['total_count']
         print(f"\n ------------------------------ \n ------------------------------")
-        print(f"Accuracy: {accuracy * 100:.2f}% on {total_count} sequences")
+        print(f"Accuracy: {accuracy * 100:.2f}% on {batch_eval['total_count'] } sequences")
+        print(f"Exact Match: {(batch_eval['exact_match'] / batch_eval['correct_count'])*100:.2f}% of {batch_eval['correct_count']} matches")
+        print(f"Synonym Match: {(batch_eval['syn_match'] / batch_eval['correct_count'])*100:.2f}% of {batch_eval['correct_count']} matches")
+        print(f"------------------------------ \n ------------------------------")
+        print("SetUp")
+        print(f"max_context_length: {max_context_length}")
+        print(f"use_control_training_data: {use_control_training_data}")
+        print(f"use_aphasia_training_data: {use_aphasia_training_data}")
+        print(f"learning_rate: {learning_rate}")
+        print(f"epochs: {epochs}")
+        print(f"batch_size: {batch_size}")
         print(f"------------------------------ \n ------------------------------")
 
-
-    return accuracy
 
 
 
@@ -194,17 +240,27 @@ def evaluate_prediction(predicted_token_id, target_token_id, sentence_tokens):
     # Accept an exact match
     if predicted_token_id == target_token_id:
         print("Match! ")
-        return True
+        batch_eval['correct_count'] += 1
+        batch_eval['exact_match'] += 1
+        result = "Exact Match"
+        score = False
 
-    # If not an exact match, check if prediction is a synonym of target
-    score = check_synonyms(predicted_word, target_word, sentence_tokens)
-    print("Synonym score: ", score)
-    if score > 0.75:
-        print("Synonym match!")
-        return True
-    else:
-        print("!!! No match ")
-        return False
+    else: # If not an exact match, check if prediction is a synonym of target
+        score = check_synonyms(predicted_word, target_word, sentence_tokens)
+        print("Synonym score: ", score)
+        if score > 0.75:
+            print("Synonym match!")
+            batch_eval['correct_count'] += 1
+            batch_eval['syn_match'] += 1
+            result = "Synonym Match"
+        else:
+            print("!!! No match ")
+            result = False
+
+    return [predicted_word, target_word, result, score]
+
+
+
 
 
 def check_synonyms(predicted, target, sentence_tokens):
@@ -275,24 +331,24 @@ def print_highlighted_result(pred_tokens, org_sent):
 
 
 
-
-
-
 def main():
+    # Create log files
+    eval_results_filename = f"pred_{max_context_length}_{use_control_training_data}_{use_aphasia_training_data}.csv"
+    run_writer, run_file, log_writer, log_file = LogResults.create_results_files(eval_results_filename) # returns writers to append results + file objects to close
 
     # Setup models
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     mlm_model.to(device)  # Move the model to the device ("cpu" or "cuda")
     bart_model.to(device)
 
+    # Prepare training data and run training on the BERT model
     if use_control_training_data or use_aphasia_training_data:
-        # Prepare training data and run training on the BERT model
-        dataloader = TrainingData.get_training_data(use_control_training_data, use_aphasia_training_data, minimum_context_length)
+        dataloader = TrainingData.get_training_data(use_control_training_data, use_aphasia_training_data, max_context_length, batch_size)
         training(mlm_model, dataloader, device)
 
     # Prepare testing data
     # Get a dataset containing the masked version of all transcripts within the training data directory
-    test_dataset = TestingData.mask_from_directory(minimum_context_length)
+    test_dataset = TestingData.mask_from_directory(max_context_length)
     
     # Batch this dataset to step through each data instance
     loader = torch.utils.data.DataLoader(
@@ -303,13 +359,24 @@ def main():
     print("Dataset Loaded")
 
     # Run BERT on testing data
-    run_bert(loader)
+    run_bert(loader, run_writer)
+
+    #[max_context_length, use_control_training_data, use_aphasia_training_data, learning_rate, batch_size,
+    #                     "epoch1", "epoch2", "epoch3",
+    #                     "correct_count", "total_count", "exact_match", "syn_match", "accuracy"])
+
+    row = set_up_vars + epoch_losses + list(batch_eval.values()) + [batch_eval['correct_count'] / batch_eval['total_count'] * 100]
+    print(row)
+    log_writer.writerow(row)
+
+    # Close log files
+    run_file.close()
+    log_file.close()
 
     # Run model on random tokens in the dataset + calculate overall produced accuracy
-    #accuracy_random_tokens(training_data, mlm_model, tokenizer, device)
-
+    # accuracy_random_tokens(training_data, mlm_model, tokenizer, device)
     # Paraphrase output
-    #paraphrase_text(result)
+    # paraphrase_text(result)
 
 
 
