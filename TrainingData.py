@@ -7,9 +7,6 @@ import os
 import string
 from sklearn.model_selection import train_test_split
 
-batch_size = 32
-
-
 # Initialize the tokenizer from the model
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 # Get BERT masked language model from Hugging Face
@@ -34,17 +31,17 @@ class TextDataset(torch.utils.data.Dataset):
 
 
 # Get suitable datasets from hardcoded directories based on passed flags
-def get_training_data( control_data_flag, aphasia_data_flag, minimum_context_length):
+def get_training_data( control_data_flag, aphasia_data_flag, max_context_length, batch_size):
     datasets = []
 
     if control_data_flag:
         print("Getting control data..")
-        control_dataset = dataset_from_directory(control_directory, minimum_context_length)
+        control_dataset = dataset_from_directory(control_directory, max_context_length)
         datasets.append(control_dataset)
 
     if aphasia_data_flag:
         print("Getting aphasia data..")
-        aphasia_dataset = dataset_from_directory(aphasia_directory, minimum_context_length)
+        aphasia_dataset = dataset_from_directory(aphasia_directory, max_context_length)
         datasets.append(aphasia_dataset)
 
     # Combine if more than one, else use single dataset
@@ -52,12 +49,12 @@ def get_training_data( control_data_flag, aphasia_data_flag, minimum_context_len
     final_dataset = ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
 
     # Randomly mask tokens and prepare to be processed
-    dataloader = load_dataset(final_dataset)
+    dataloader = load_dataset(final_dataset, batch_size)
     return dataloader
 
 
 
-def dataset_from_directory(dir_path, minimum_context_length):
+def dataset_from_directory(dir_path, max_context_length):
     # Create 2d array of all data
     all_data = []
     # Get all .cex files in the directory
@@ -69,20 +66,21 @@ def dataset_from_directory(dir_path, minimum_context_length):
 
             # Separate each utterance to be processed individually
             data = data.split('\n')
-            if minimum_context_length:
+            if max_context_length:
+
                 # Add context to each utterance
-                data_w_context = add_context(data, minimum_context_length) # returns list of strings
+                data_w_context = add_context(data, max_context_length) # returns list of strings
                 all_data.extend(data_w_context) # add elements to array
             else:
                 data = ' '.join(data)
                 all_data.append(data) # add string to end of array
 
     print(type(all_data), len(all_data))
-    print(all_data[:5])
+    print(all_data[:1])
 
     # -- Tokenise data
     inputs = tokenizer(
-        all_data, max_length=64, truncation=True, padding=True, return_tensors=None
+        all_data, max_length=256, truncation=True, padding=True, return_tensors=None
     )  # keys: input_ids, token_type_ids, attention_mask
 
     # Create dataset to define how to load and batch the tokenized data
@@ -91,6 +89,59 @@ def dataset_from_directory(dir_path, minimum_context_length):
     print(f" -- Created Dataset size: {len(dataset)}")
 
     return dataset
+
+
+
+
+def load_dataset(dataset, batch_size):
+    # Hugging Face’s masking collator to automatically mask 15% of the tokens
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=True,
+        mlm_probability=0.15
+    )
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=data_collator
+    )
+    return dataloader
+
+
+# Add previous and trailing lines to each utterance to introduce context
+# Build an adaptive context window around the masked line of at least min number of words
+# text: array of strings
+def add_context(text, max_size):
+    #print("Adding context")
+    text_w_context = []
+    for index in range(len(text)):
+        line_w_context = text[index].split()
+        length = len(line_w_context)
+        buffer = 1
+
+        while length < max_size:
+            prev_line = text[index - buffer].split() + ['[SEP]'] if index - buffer >= 0 else []
+            next_line = ['[SEP]'] +  text[index + buffer].split() if index + buffer < len(text) else []
+            buffer += 1
+
+            # Add context around the line
+            line_w_context = prev_line + line_w_context + next_line
+            length = len(line_w_context)
+
+            if prev_line == [] and next_line == []:
+                # Entire text has been added so break even if length has not been met
+                break
+
+        # Join the combined lines into a single string and add to array
+        final_line = ' '.join(line_w_context)
+        text_w_context.append(final_line)
+
+        #print('\n')
+        #for l in text_w_context:
+        #    print(l)
+    return text_w_context
 
 
 
@@ -113,52 +164,3 @@ def dataset_from_file(file_path):
     # Create dataset to define how to load and batch the tokenized data
     dataset = TextDataset(inputs)
     return dataset
-
-
-
-def load_dataset(dataset):
-    # Hugging Face’s masking collator to automatically mask 15% of the tokens
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=True,
-        mlm_probability=0.15
-    )
-
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=data_collator
-    )
-    return dataloader
-
-
-# Add previous and trailing lines to each utterance to introduce context
-# Build an adaptive context window around the masked line of at least min number of words
-# text: array of strings
-def add_context(text, min_size):
-    text_w_context = []
-    for index in range(len(text)):
-        line_w_context = text[index].split()
-        length = len(line_w_context)
-        buffer = 1
-
-        while length < min_size:
-            prev_line = text[index - buffer].split() if index - buffer >= 0 else []
-            next_line = text[index + buffer].split() if index + buffer < len(text) else []
-            buffer += 1
-
-            # Add context around the line
-            line_w_context = prev_line + ['[SEP]'] + line_w_context + ['[SEP]'] + next_line
-            length = len(line_w_context)
-
-        # Join the combined lines into a single string and add to array
-        final_line = ' '.join(line_w_context)
-        text_w_context.append(final_line)
-
-        #print('\n')
-        #for l in text_w_context:
-        #    print(l)
-    return text_w_context
-
-
