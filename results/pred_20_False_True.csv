@@ -1,0 +1,38 @@
+prediction,target,result,score
+her,her,Exact Match,False
+raining,wet,False,0.5
+him,him,Exact Match,False
+there,then,False,0.5
+he,he,Exact Match,False
+umbrella,umbrella,Exact Match,False
+his,his,Exact Match,False
+and,umbrella,False,False
+ready,ready,Exact Match,False
+says,says,Exact Match,False
+house,umbrella,False,0.5556
+little,naughty,False,0.5
+umbrella,umbrella,Exact Match,False
+umbrella,umbrella,Exact Match,False
+he,he,Exact Match,False
+he,',False,False
+s,s,Exact Match,False
+rain,hands,False,0.3333
+umbrella,umbrella,Exact Match,False
+umbrella,umbrella,Exact Match,False
+hand,hand,Exact Match,False
+leaves,refuses,False,0.7059
+child,child,Exact Match,False
+is,was,Synonym Match,1.0
+sees,sees,Exact Match,False
+umbrella,umbrella,Exact Match,False
+his,his,Exact Match,False
+goes,un,False,0.25
+goes,##fur,False,False
+in,##ls,False,False
+umbrella,umbrella,Exact Match,False
+rain,rain,Exact Match,False
+the,her,False,False
+umbrella,umbrella,Exact Match,False
+he,he,Exact Match,False
+child,mother,False,0.6316
+child,mother,False,0.6316
