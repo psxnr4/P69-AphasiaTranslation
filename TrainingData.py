@@ -1,4 +1,5 @@
 # @ adapted from https://smartcat.io/tech-blog/llm/fine-tuning-bert-with-masked-language-modelling/
+# create dataset from a directory of .cex files
 
 import torch
 from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed, DataCollatorForLanguageModeling #BERT mlm
@@ -19,7 +20,7 @@ aphasia_directory = directory_root + '/Aphasia Training Data/Repaired-Flo'
 
 # Define training dataset
 class TextDataset(torch.utils.data.Dataset):
-    def __init__(self, encodings, target_ids=None):
+    def __init__(self, encodings):
         self.encodings = encodings
 
     def __len__(self):
@@ -32,6 +33,7 @@ class TextDataset(torch.utils.data.Dataset):
 
 # Get suitable datasets from hardcoded directories based on passed flags
 def get_training_data( control_data_flag, aphasia_data_flag, max_context_length, batch_size):
+    #print("--------- Preparing training data ----------")
     datasets = []
 
     if control_data_flag:
@@ -63,24 +65,26 @@ def dataset_from_directory(dir_path, max_context_length):
             file_path = os.path.join(dir_path, filename)
             with open(file_path, 'r', encoding='utf-8') as f:
                data = f.read()
-
             # Separate each utterance to be processed individually
             data = data.split('\n')
             if max_context_length:
-
                 # Add context to each utterance
+                #print("Adding context to utterances..")
                 data_w_context = add_context(data, max_context_length) # returns list of strings
-                all_data.extend(data_w_context) # add elements to array
+
+                all_data.extend(data_w_context)  # add elements to array
             else:
                 data = ' '.join(data)
                 all_data.append(data) # add string to end of array
 
-    print(type(all_data), len(all_data))
+    print("Retrieved datasets: ")
+    print("type: ", type(all_data), " len: ",len(all_data))
+    print("Example: ")
     print(all_data[:1])
 
     # -- Tokenise data
     inputs = tokenizer(
-        all_data, max_length=256, truncation=True, padding=True, return_tensors=None
+        all_data, max_length=512, truncation=True, padding=True, return_tensors=None
     )  # keys: input_ids, token_type_ids, attention_mask
 
     # Create dataset to define how to load and batch the tokenized data
@@ -105,7 +109,11 @@ def load_dataset(dataset, batch_size):
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=data_collator
+        collate_fn=data_collator,
+        num_workers=2,  # ⚡ use multiple subprocesses to load data
+        pin_memory=True,  # ⚡ enables faster transfer to GPU
+        prefetch_factor=2,  # ⚡ overlap data loading with training
+        persistent_workers=True  # ⚡ keep workers alive between epochs
     )
     return dataloader
 
@@ -114,7 +122,7 @@ def load_dataset(dataset, batch_size):
 # Build an adaptive context window around the masked line of at least min number of words
 # text: array of strings
 def add_context(text, max_size):
-    #print("Adding context")
+    #print("Adding context to utterances..")
     text_w_context = []
     for index in range(len(text)):
         line_w_context = text[index].split()
@@ -142,8 +150,6 @@ def add_context(text, max_size):
         #for l in text_w_context:
         #    print(l)
     return text_w_context
-
-
 
 
 # Read in training data from the given path, tokenise and create dataset
