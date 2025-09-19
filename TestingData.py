@@ -1,3 +1,6 @@
+# create dataset of utterances from directory of .cex files - these are augmented with context from neighbouring utterances
+# these contain ground truth labels for evaluation
+
 import re
 import difflib
 from transformers import AdamW, BertTokenizer, BertForMaskedLM, set_seed, DataCollatorForLanguageModeling
@@ -69,6 +72,7 @@ def get_repaired_flo(filename):
 # https://www.geeksforgeeks.org/dsa/remove-duplicate-words-from-sentence-using-regular-expression/
 def remove_repetition(sentences):
     print('\n ..Removing Repeated Words..')
+    print(r"applying: \b((?:\w+\W+){{{n-1}}}\w+)(?:\W+\1\b)+")
     cleaned_sentences = []
     num_rep_words = 2
 
@@ -91,7 +95,7 @@ def remove_repetition(sentences):
 
             sentence = re.sub(regex, r'\1', sentence, flags=re.IGNORECASE) # sub with first pattern
 
-        print(sentence)
+        #print(sentence)
         cleaned_sentences.append(sentence)
 
     return cleaned_sentences
@@ -153,7 +157,7 @@ def find_error_position(orig_words, flo_words ):
                     # Append to the output
                     line_errors.append( (error_position,repair_word))
                     continue
-    print("errors: ", line_errors)
+    #print("errors: ", line_errors)
     # return list of pairs (error_pos, repair_word)
     return line_errors
 
@@ -170,6 +174,7 @@ def mask_word(line_errors, line):
     offset = 0
     # For each error in this line
     for pair in line_errors:
+        print("Error: ", pair)
         error_position = pair[0]
         repair_word = pair[1]
         # Create repaired line
@@ -194,9 +199,10 @@ def mask_word(line_errors, line):
 
 
 def process_line(raw_line, flo_line):
+
     print('\n--Utterance --')
-    print("Labelled : ", raw_line)
-    print("Clean : ", flo_line)
+    print("Labelled from transcript : ", raw_line)
+    print("Cleaned from FLO : ", flo_line)
 
     # remove error annotations on words
     raw_line = raw_line.replace('@u', '')
@@ -215,7 +221,7 @@ def process_line(raw_line, flo_line):
     print("Masked line: ", masked_line)
     print("Repaired line: ", repaired_line)
 
-    return masked_line, repaired_line
+    return masked_line, repaired_line, line_errors
 
 
 
@@ -223,8 +229,8 @@ def tokenise_line(masked_line, repaired_line):
     # @ adapted from https://docs.pytorch.org/TensorRT/_notebooks/Hugging-Face-BERT.html
     print('\n..Tokenising Input..')
 
-    print("masked_sentences type:", type(masked_line))
-    print("first element:", masked_line[0] if masked_line else None)
+    #print("masked_sentences type:", type(masked_line))
+    #print("first element:", masked_line[0] if masked_line else None)
 
     # Tokenise the masked line and encode -- include padding as sentences are different lengths
     encoded_inputs = tokenizer(masked_line,
@@ -232,7 +238,7 @@ def tokenise_line(masked_line, repaired_line):
                                return_tensors='pt',
                                padding='max_length',
                                truncation=True,
-                               max_length=128
+                               max_length=50
                             )
     #print("encoded_inputs type:", type(encoded_inputs))
     #print(encoded_inputs)
@@ -246,13 +252,13 @@ def tokenise_line(masked_line, repaired_line):
                                return_tensors='pt',
                                padding='max_length',
                                truncation=True,
-                               max_length=128
+                               max_length=50
                             )
 
 
     input_ids = encoded_inputs["input_ids"].squeeze(0)  # (seq_len,)
     repaired_ids = repaired_inputs["input_ids"].squeeze(0)
-    #print("masked line tokens: ", input_ids)
+    print("\n Masked Line Tokens: ", input_ids)
     #print("repaired line tokens: ", repaired_ids)
 
     # Create a tensor of the same shape to hold the labelling
@@ -261,7 +267,7 @@ def tokenise_line(masked_line, repaired_line):
     labels[input_ids != tokenizer.mask_token_id] = -100
     # At [MASK] positions, insert the matching token id from the repaired line
     labels[input_ids == tokenizer.mask_token_id] = repaired_ids[input_ids == tokenizer.mask_token_id]
-    #print("label tokens: ", labels)
+    print("\n Label Tokens: ", labels)
 
     encoded_inputs["labels"] = labels.unsqueeze(0)  # back to batch shape
 
@@ -283,14 +289,15 @@ def add_context_to_line(repaired_line, masked_line, text, index, min_size):
     # Counter to ensure context is added from both sides until the length limit is reached
     buffer = 1
     while length < min_size:
+        print("\nUtterance is less than min_size.")
         # Check that we are not going past the boundaries of the text if so reset to remove prev. value + append no additional info
         # Get the lines before and after this line in the text
-        prev_line = text[index - buffer].split() + ['[SEP]'] if index - buffer >= 0 else []
-        next_line = ['[SEP]'] + text[index + buffer].split() if index + buffer < len(text) else []
+        prev_line = text[index - buffer].split() if index - buffer >= 0 else []
+        next_line = text[index + buffer].split() if index + buffer < len(text) else []
         buffer = buffer + 1
-        #print("PREV: ", prev_line)
-        #print(line_w_context)
-        #print("NEXT: ", next_line)
+        print("PREV: ", prev_line)
+        print("CURRENT: ", line_w_context)
+        print("NEXT: ", next_line)
 
         # Concatenate the parts of the texts surrounding the masked line
         line_w_context = prev_line + line_w_context + next_line
@@ -305,17 +312,32 @@ def add_context_to_line(repaired_line, masked_line, text, index, min_size):
             # Entire text has been added so break even if length has not been met
             break
 
-    print("\noriginal line: ")
-    print(masked_line)
+    #print("\n original line: ")
+    #print(masked_line)
 
-    print("\nline with context: ")
+    print("\n Augmented line with context: ")
     print(line_w_context)
 
-    print("\n padded repair line: ")
-    print(repaired_line)
+    #print("\n padded repair line: ")
+    #print(repaired_line)
 
     return line_w_context, repaired_line
 
+
+def add_prompt(text):
+    prompt = "so ‡ now I'm actually going to show you some pictures . and I'm gonna ask you to tell me a story &-um following them .	and I need the story to have a beginning a middle and an end ."
+    prompt = prompt.split()
+    text = prompt + ['[SEP]'] + text
+    '''
+    text_w_context = []
+    for index in range(len(text)):
+        line_w_context = prompt + ['[SEP]'] + text[index].split()
+        # Join the combined lines into a single string and add to array
+        final_line = ' '.join(line_w_context)
+        text_w_context.append(final_line)
+    '''
+    #print(text)
+    return text
 
 
 # Helper function to combine list of line encodings into a single dictionary
@@ -334,10 +356,16 @@ def mask_from_directory(max_context_length):
 
     all_target_words = []
     encoded_masked_lines = [] # list of dictionaries of tensors
+    all_masked_lines = []
+    all_lines_w_context = []
 
     # Get all .cex files in the directory
     for filename in os.listdir(raw_gem_dir):
         if filename.endswith('.cex'):
+            print(
+                "--------------------------------------------------------------------------------------------------------------")
+            print(
+                "--------------------------------------------------------------------------------------------------------------")
             print("---- ", filename, " ----")
             # Store across file
             full_masked_file = ''
@@ -360,19 +388,32 @@ def mask_from_directory(max_context_length):
                     continue
 
                 # Process line to get position of the error and mask its corresponding token in the cleaned transcript
-                masked_line, repaired_line = process_line(raw_gem[index], flo_gem[index])
+                masked_line, repaired_line, line_errors = process_line(raw_gem[index], flo_gem[index])
 
                 line_with_context, repaired_line = add_context_to_line(repaired_line, masked_line, repaired_gem, index, max_context_length)
 
+                #if max_context_length >= 100:
+                    # Add prompt context
+                #    line_with_context = add_prompt(line_with_context)
+
                 # Tokenise the line and create a copy labelling the suggested target word that will be used to evaluate error prediction
                 encoded_line = tokenise_line(line_with_context, repaired_line) # returns a dictionary of tensors
-                #print("encoded_line: ", encoded_line)
+                #print("Encoded_line: ", encoded_line)
 
                 # Add to list of encodings
                 encoded_masked_lines.append(encoded_line)
 
-                print( encoded_line )
+                #print( encoded_line )
                 #print( tokenizer.decode(encoded_line['input_ids'][0], skip_special_tokens=False))
+                # Add to storage
+                all_masked_lines.append(masked_line)
+                all_lines_w_context.append(' '.join(line_with_context))
+                all_target_words += line_errors
+
+                print("\n", masked_line)
+                print(
+                    "--------------------------------------------------------------------------------------------------------------")
+
 
 
     # -- END OF ALL FILES
@@ -383,13 +424,32 @@ def mask_from_directory(max_context_length):
 
     print(".. Writing to dataset ..")
     # Create a dataset of the token encodings and link the masked strings
-    dataset = TrainingData.TextDataset(all_encodings, all_target_words)
+    dataset = TrainingData.TextDataset(all_encodings)
 
     print(f" -- Created Dataset size: {len(dataset)}")
     print(f"input_ids length: {len(all_encodings['input_ids'])}")
     print(f"labels length: {len(all_encodings['labels'])}")
+    print("example: ", dataset[0])
 
+    write_to_file(all_lines_w_context, all_target_words)
     return dataset
 
 
+output_path = r'C:\Users\nat\PycharmProjects\PythonProject\masked_lines.txt'
+target_path = r'C:\Users\nat\PycharmProjects\PythonProject\target_words.csv'
+def write_to_file( lines, targets):
+    #print(lines)
+    #print(targets)
+    with open(output_path, "w", encoding="utf-8") as file:
+        for line in lines:
+            #file.write("Please predict a suitable word replacement for the masked word, using only surrounding context from this prompt to support the prediction. Ignore all previous passages: " + line + '\n')
+            file.write( line + '\n')
+    with open(target_path, "w", encoding="utf-8") as file:
+        for pair in targets:
+            repair_word = pair[1]
+            file.write(str(repair_word)+'\n')
+    print("\n-- File written to: ", output_path)
 
+
+
+#mask_from_directory(20)
